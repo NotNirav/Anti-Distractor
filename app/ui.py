@@ -43,6 +43,7 @@ class UIHooks(Protocol):
     ) -> None: ...
     def hide_popups_and_overlay(self) -> None: ...
     def show_tier0_shift_popup(self, message: str) -> None: ...
+    def update_ai_calls(self, t1_count: int, t2_count: int) -> None: ...
     def show_review(self, review_text: str, on_close: Callable[[], None]) -> None: ...
 
 
@@ -312,13 +313,33 @@ class TkinterUI:
                 w.bind("<Button-1>", _start_drag)
                 w.bind("<B1-Motion>", _on_drag)
 
-            # Bottom row: End Session Button
+            # Bottom row: AI calls line and End Session Button
+            bottom_row = ttk.Frame(frame)
+            bottom_row.pack(fill="x", pady=(4, 0))
+
+            self._hud_ai_calls_label = ttk.Label(
+                bottom_row,
+                text="AI calls: T1 0 / T2 0",
+                font=("Segoe UI", 8),
+                foreground="#666666",
+            )
+            self._hud_ai_calls_label.pack(side="left", anchor="w")
+
             end_btn = ttk.Button(
-                frame,
+                bottom_row,
                 text="⏹ End Session",
                 command=on_end_session,
             )
-            end_btn.pack(side="right", pady=(4, 0))
+            end_btn.pack(side="right")
+
+        self.dispatch(_action)
+
+    def update_ai_calls(self, t1_count: int, t2_count: int) -> None:
+        """Update the small HUD line showing AI call counts (thread-safe)."""
+
+        def _action() -> None:
+            if hasattr(self, "_hud_ai_calls_label") and self._hud_ai_calls_label is not None and self._hud_ai_calls_label.winfo_exists():
+                self._hud_ai_calls_label.config(text=f"AI calls: T1 {t1_count} / T2 {t2_count}")
 
         self.dispatch(_action)
 

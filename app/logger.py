@@ -66,10 +66,15 @@ class SessionLogger:
                     reason TEXT NOT NULL,
                     action_taken TEXT NOT NULL,
                     user_override INTEGER NOT NULL DEFAULT 0,
+                    model_used TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (session_id) REFERENCES sessions(id)
                 );
                 """
             )
+            try:
+                conn.execute("ALTER TABLE activity_logs ADD COLUMN model_used TEXT DEFAULT ''")
+            except Exception:
+                pass
 
     def start_session(
         self,
@@ -106,6 +111,7 @@ class SessionLogger:
         url = ctx.active_url or ""
         on_task_int = 1 if verdict.on_task else 0
         override_int = 1 if user_override else 0
+        model_used = getattr(verdict, "model_used", "") or ""
 
         with self._lock, self._get_connection() as conn:
             cursor = conn.execute(
@@ -113,9 +119,9 @@ class SessionLogger:
                 INSERT INTO activity_logs (
                     session_id, timestamp, trigger_type, app_or_domain, title,
                     url, tier_used, activity, on_task, confidence, reason,
-                    action_taken, user_override
+                    action_taken, user_override, model_used
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -131,6 +137,7 @@ class SessionLogger:
                     verdict.reason or "",
                     action_taken,
                     override_int,
+                    model_used,
                 ),
             )
             return int(cursor.lastrowid)

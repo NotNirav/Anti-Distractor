@@ -125,6 +125,8 @@ class AppController:
         self._last_log_id: int | None = None
         self._tick_handle: Any = None
         self._ending = False
+        self._t1_calls = 0
+        self._t2_calls = 0
 
         self.logger: SessionLogger | None = None
         self.tab_store: TabSnapshotStore | None = None
@@ -176,6 +178,8 @@ class AppController:
             self.current_goal = goal
             self._current_mode = mode
             self._last_log_id = None
+            self._t1_calls = 0
+            self._t2_calls = 0
 
         self.ui.show_monitoring_hud(goal, mode, on_end_session=self.end_session)
         if hasattr(self.ui, "update_hud_status"):
@@ -262,6 +266,18 @@ class AppController:
                         )
                         with self._lock:
                             self._last_log_id = log_id
+                            if verdict.tier_used == 1:
+                                self._t1_calls += 1
+                            elif verdict.tier_used == 2:
+                                self._t2_calls += 1
+                            t1_cnt = self._t1_calls
+                            t2_cnt = self._t2_calls
+
+                        if hasattr(self.ui, "update_ai_calls"):
+                            try:
+                                self.ui.update_ai_calls(t1_cnt, t2_cnt)
+                            except Exception:
+                                pass
                     except Exception:
                         logger.exception("Failed to log verdict to SQLite")
 
@@ -447,6 +463,21 @@ class AppController:
         except Exception:
             logger.exception("Review generation failed")
             review_text = f"## Focus Session Review\n\nGoal: {goal}\nChecks logged: {len(logs)}"
+
+        # Compute per-model counts from session logs
+        model_counts: dict[str, int] = {}
+        for row in logs:
+            m = row.get("model_used")
+            if m:
+                model_counts[m] = model_counts.get(m, 0) + 1
+            elif row.get("tier_used") == 0:
+                model_counts["Tier 0 (rules)"] = model_counts.get("Tier 0 (rules)", 0) + 1
+
+        if model_counts:
+            breakdown_lines = ["\n\n### Model Usage:"]
+            for m_name, count in sorted(model_counts.items(), key=lambda x: -x[1]):
+                breakdown_lines.append(f"- {m_name}: {count}")
+            review_text += "\n".join(breakdown_lines)
 
         if session_logger is not None and session_id is not None:
             try:

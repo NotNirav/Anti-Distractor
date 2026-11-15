@@ -140,3 +140,83 @@ def test_session_logger_lifecycle():
             assert s_row["ended_at"] is not None
             assert s_row["ended_at"] >= s_row["started_at"]
             assert s_row["review_text"] == review_text
+
+
+def test_session_logger_model_used_and_migration():
+    """Verify model_used column storage and ALTER TABLE migration for legacy databases."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "legacy.db")
+
+        # Create legacy schema without model_used column
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                profile_json TEXT NOT NULL,
+                review_text TEXT
+            );
+            CREATE TABLE activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                trigger_type TEXT NOT NULL,
+                app_or_domain TEXT NOT NULL,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL DEFAULT '',
+                tier_used INTEGER NOT NULL,
+                activity TEXT NOT NULL,
+                on_task INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                reason TEXT NOT NULL,
+                action_taken TEXT NOT NULL,
+                user_override INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+        """)
+        conn.close()
+
+        # Initializing SessionLogger on legacy DB runs migration
+        logger = SessionLogger(db_path=db_path)
+
+        profile = GoalProfile(
+            goal="DSA",
+            on_task_topics=["algo"],
+            allowed_domains=["leetcode.com"],
+            borderline_domains=[],
+            blocked_domains=[],
+            allowed_apps=[],
+            blocked_apps=[],
+        )
+        sid = logger.start_session("DSA", "normal", 15, profile)
+
+        ctx = ActivityContext(
+            trigger_type="tab_activated",
+            goal="DSA",
+            foreground_window=None,
+            tab_snapshot=None,
+            open_windows=[],
+            source_key="leetcode.com",
+            display_title="LeetCode",
+            active_url="https://leetcode.com",
+            timestamp=100.0,
+        )
+        verdict = JudgeVerdict(
+            activity="LeetCode",
+            on_task=True,
+            confidence=0.99,
+            reason="On-task",
+            tabs_to_close=[],
+            tier_used=1,
+            model_used="gemini-3.5-flash-lite",
+        )
+        logger.log_event(sid, ctx, verdict, action_taken="none")
+
+        logs = logger.get_session_logs(sid)
+        assert len(logs) == 1
+        assert logs[0]["model_used"] == "gemini-3.5-flash-lite"

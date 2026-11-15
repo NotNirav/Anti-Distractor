@@ -60,6 +60,9 @@ class MockUI:
     def hide_popups_and_overlay(self) -> None:
         self.popups_hidden += 1
 
+    def update_ai_calls(self, t1_count: int, t2_count: int) -> None:
+        pass
+
     def show_review(self, review_text: str, on_close: Any) -> None:
         self.reviews.append(review_text)
         self.on_close = on_close

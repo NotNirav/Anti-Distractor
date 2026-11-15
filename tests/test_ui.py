@@ -182,6 +182,11 @@ def test_ui_hud_draggable_and_ai_unavailable_status():
         _flush_events(ui, root)
 
         assert ui._hud_summary_label.cget("text") == ai_msg
+
+        # Verify AI calls HUD update
+        ui.update_ai_calls(4, 2)
+        _flush_events(ui, root)
+        assert ui._hud_ai_calls_label.cget("text") == "AI calls: T1 4 / T2 2"
     finally:
         try:
             root.destroy()
