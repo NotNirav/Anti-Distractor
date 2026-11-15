@@ -154,11 +154,17 @@ class AgentStateMachine:
 
                 if prev_state in ("GRACE_PERIOD", "LAYER_1_ASK", "LAYER_2_ULTIMATUM"):
                     action_taken = "cleared"
-                    message = "Back on task; cleared warnings."
+                    if getattr(sanitized_verdict, "rate_limited", False) or "AI unavailable" in getattr(sanitized_verdict, "reason", ""):
+                        message = "AI unavailable - rules only"
+                    else:
+                        message = "Back on task; cleared warnings."
                     ui_action = ("hide", message)
                 else:
                     action_taken = "none"
-                    message = "On task."
+                    if getattr(sanitized_verdict, "rate_limited", False) or "AI unavailable" in getattr(sanitized_verdict, "reason", ""):
+                        message = "AI unavailable - rules only"
+                    else:
+                        message = "On task."
                     ui_action = ("hud", message)
 
                 decision = AgentDecision(

@@ -525,6 +525,10 @@ def run_benchmark():
     print(f"Primary Model (Preference 1): {MODEL_PREFERENCE_1}")
     print(f"Fallback Model 2 (Preference 2): {MODEL_PREFERENCE_2}")
     print(f"Fallback Model 3 (Preference 3): {MODEL_PREFERENCE_3}")
+    print("Execution Mode:")
+    print(" - ANTI_DISTRACTOR_FAKE_JUDGE: False (Live API inference)")
+    print(" - Verdict Cache: None (Bypassed; fresh vision check per image)")
+    print(" - Hardcoded Results: False (Real image bytes processed)")
     print("=" * 80)
 
     results = []

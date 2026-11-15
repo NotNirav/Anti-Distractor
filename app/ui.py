@@ -565,7 +565,7 @@ class TkinterUI:
                 body,
                 text=(
                     message
-                    or "All AI models (Gemini 3.5 Flash-Lite, Gemma 31B, Gemma 24B) are currently experiencing "
+                    or "All AI models (Gemini 3.5 Flash-Lite, Gemma 31B, Gemma 4 26B A4B) are currently experiencing "
                     "quota limits or high demand.\n\n"
                     "Anti-Distractor has shifted to Tier 0 local rules only (allowed/blocked domain and app lists) "
                     "to maintain your focus protection until an AI model becomes available."

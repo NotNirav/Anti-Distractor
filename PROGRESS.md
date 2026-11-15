@@ -87,16 +87,20 @@
   - Implemented `tests/test_demo_runbook.py` verifying both `dev` and `demo` timing configurations, simulating all 6 steps of the 2-minute live demo script (Setup -> on-task silent pass -> off-task grace period -> Layer 1 popup -> Layer 2 strict tab closure & overlay -> lockout expiration & post-session review), and testing extension disconnect resilience.
   - Authored comprehensive [README.md](file:///d:/Computer%20Programming/Hackathons/Upcomming/Agentix%202.0/Anti-Distractor/README.md) with system architecture diagram, quick start, 3-step browser extension loading instructions, 2-minute demo runbook, timing parameters, test suite overview, and troubleshooting FAQs (including emergency escape hatches).
   - Verified full test suite (`python -m pytest tests -q`): **35 passed**, 0 failures.
-- **Model Preference Hierarchy & 20-Image Benchmark completed**:
+- **Model Preference Hierarchy, Failover Hardening & 20-Image Benchmark completed**:
   - Configured 3-tier model preference system in `app/config.py`:
     - Preference 1: `gemini-3.5-flash-lite` (primary for both Tier 1 text and Tier 2 vision)
-    - Preference 2: `gemma-4-31b-it` (automatic failover on 429/quota/tokens exhausted)
+    - Preference 2: `gemma-4-31b-it` (automatic failover on 429/quota/tokens exhausted, 404, timeouts, or network exceptions)
     - Preference 3: `gemma-4-26b-a4b-it` (tertiary fallback)
     - Last resort: Shift to Tier 0 local rules only (no AI) with user notification popup.
-  - Implemented `ModelPreferenceManager` in `app/judge.py` with thread-safe preference tracking, automatic failover, and `on_shift_to_tier0` popup callback.
-  - Added `show_tier0_shift_popup` to `UIHooks` and `TkinterUI` in `app/ui.py` to notify users whenever all AI models are offline.
-  - Implemented unit tests in `tests/test_model_preferences.py` covering failover sequence, Tier 0 mode evaluation, and automatic recovery probing (3 new tests, 38 total passed).
+  - Implemented `ModelPreferenceManager` in `app/judge.py` with thread-safe preference tracking, automatic failover across 404, 429, 500, 502, 503, 504, timeouts, connection errors, and token depletion.
+  - Added HTTP 400 schema retry before failover in `tier1_evaluate` and `tier2_evaluate`.
+  - Added markdown code fence stripping (` ```json ... ``` `) in `_extract_json_string` prior to JSON parsing.
+  - Added `show_tier0_shift_popup` to `UIHooks` and `TkinterUI` in `app/ui.py` to notify users whenever all AI models are offline, and set visible HUD status to `"AI unavailable - rules only"` so failed checks never silently count as normal on-task.
+  - Fixed all "Gemma 24B" typo occurrences to "Gemma 4 26B A4B" across config, judge, UI, and test suites.
+  - Implemented unit tests in `tests/test_model_preferences.py` covering failover sequence, 404/timeout/network failover, markdown fence stripping, Tier 0 shift popup and HUD status, and automatic recovery probing (6 tests in suite, 41 total passed).
   - Created 20 realistic desktop benchmark screenshots (`scripts/run_image_benchmark.py`) covering 10 DSA on-task scenarios and 10 non-DSA distraction scenarios.
+  - Verified benchmark runner: live API inference (`ANTI_DISTRACTOR_FAKE_JUDGE=False`), cache bypassed, real generated image bytes, and `model_used` logged for every image.
   - Benchmarked all 20 images against the preference models: **100.0% accuracy** (20/20 correct predictions, 0 false positives, 0 false negatives, average confidence 1.00).
 - **What's left**: None. All phases, tasks, model preference hierarchy, and benchmark evaluations are 100% complete.
 
@@ -113,6 +117,7 @@
 - [T3.3] `tier0_evaluate` in `app/judge.py` now skips `tab_snapshot` domain rules when `foreground_window.is_browser` is `False` so background browser tabs do not override an active allowed desktop app.
 - [T3.3] `EventEngine` in `app/event_engine.py` uses a single `threading.Condition` worker loop (with optional injectable test hooks) instead of multiple `threading.Timer` threads, and heartbeat checks preserve an active borderline dwell deadline so `dwell` can still fire when `heartbeat_seconds < dwell_seconds` (as in `DEV_TIMINGS`).
 - [T4.1 Post-Review] In `app/state_machine.py`, strict lockout expiration now preserves state in `LAYER_2_ULTIMATUM` and retains strike count without prematurely resetting to `ON_TASK` or granting a new grace period. When `on_lockout_done` triggers an immediate check, an on-task verdict resets to `ON_TASK` and clears warnings, while an off-task verdict returns immediately to Layer 2 strict enforcement.
+- [Multi-Model Preference & Failover] Expanded failover triggers in `app/judge.py` to cover 404, timeouts, connection/network errors, and token exhaustion. HTTP 400 schema mismatches retry without schema before failing over. Markdown code fences are stripped before JSON decoding. Exhaustion of all AI models sets HUD status to `"AI unavailable - rules only"` and triggers a one-time user alert. Corrected "Gemma 24B" label typos to "Gemma 4 26B A4B". Added global pytest test isolation fixture in `tests/conftest.py`.
 
 ## Escalation suggestions
 

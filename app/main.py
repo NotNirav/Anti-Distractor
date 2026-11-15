@@ -190,8 +190,19 @@ class AppController:
         session_id = session_logger.start_session(goal, mode, duration_minutes, profile)
 
         model_manager = get_model_manager()
-        if hasattr(self.ui, "show_tier0_shift_popup"):
-            model_manager.on_shift_to_tier0 = self.ui.show_tier0_shift_popup
+        def _on_tier0_shift(msg: str) -> None:
+            if hasattr(self.ui, "show_tier0_shift_popup"):
+                try:
+                    self.ui.show_tier0_shift_popup(msg)
+                except Exception:
+                    logger.exception("Failed to show Tier 0 shift popup")
+            if hasattr(self.ui, "update_hud_status"):
+                try:
+                    self.ui.update_hud_status("ON_TASK", "AI unavailable - rules only")
+                except Exception:
+                    pass
+
+        model_manager.on_shift_to_tier0 = _on_tier0_shift
 
         tab_store = TabSnapshotStore()
         command_queue = CommandQueue()

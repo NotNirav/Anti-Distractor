@@ -40,7 +40,7 @@ class ModelPreferenceManager:
 
     Preference 1: Gemini 3.5 Flash-Lite
     Preference 2: Gemma 31B (gemma-4-31b-it)
-    Preference 3: Gemma 24B (gemma-4-26b-a4b-it)
+    Preference 3: Gemma 4 26B A4B (gemma-4-26b-a4b-it)
     Last resort: Shift to Tier 0 rules only (no AI) with user-facing notification.
     """
 
@@ -114,8 +114,8 @@ class ModelPreferenceManager:
                 if self.on_shift_to_tier0:
                     try:
                         self.on_shift_to_tier0(
-                            "All AI models (Gemini 3.5 Flash-Lite, Gemma 31B, Gemma 24B) are currently "
-                            "unavailable due to rate limits or capacity. Shifting to Tier 0 rules only "
+                            "All AI models (Gemini 3.5 Flash-Lite, Gemma 31B, Gemma 4 26B A4B) are currently "
+                            "unavailable due to rate limits, timeouts, or capacity. Shifting to Tier 0 rules only "
                             "until an AI becomes available."
                         )
                     except Exception:
@@ -163,14 +163,22 @@ class _JudgeVerdictResponse(BaseModel):
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Check if an exception represents rate limits, quota exhaustion, 429, 503, or token depletion."""
+    """Check if an exception warrants failover: 404, 429, 500, 503, timeouts, network errors, or quota."""
     code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    if code in (429, 500, 503):
+    if code in (404, 429, 500, 502, 503, 504):
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return True
     s = str(exc).lower()
     return any(
         k in s
         for k in (
+            "not found",
+            "404",
+            "timeout",
+            "timed out",
+            "connection",
+            "network",
             "resource_exhausted",
             "quota",
             "rate limit",
@@ -184,14 +192,26 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 def _extract_json_string(text: str) -> str:
-    """Extract valid JSON from raw text, code fences (```json ... ```), or thinking parts."""
+    """Extract valid JSON from raw text, stripping markdown code fences (```json ... ```) or extra prose."""
     if not text:
         return ""
     cleaned = text.strip()
+
+    # Strip markdown code fences if wrapped
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:].strip()
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:].strip()
+
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3].strip()
+
+    # If code fences are embedded inside prose
     if "```json" in cleaned:
         cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
     elif "```" in cleaned:
         cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -404,7 +424,13 @@ Instructions:
                 ),
             )
         except Exception as e:
-            if "schema" in str(e).lower() or "invalid_argument" in str(e).lower() or "not supported" in str(e).lower():
+            if (
+                "schema" in str(e).lower()
+                or "invalid_argument" in str(e).lower()
+                or "not supported" in str(e).lower()
+                or getattr(e, "code", None) == 400
+                or getattr(e, "status_code", None) == 400
+            ):
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt + "\n\nCRITICAL: Respond ONLY with a valid JSON object matching the schema. No markdown formatting.",
@@ -431,12 +457,10 @@ Instructions:
         try:
             return _eval_with_model(target_model)
         except Exception as exc:
-            if _is_rate_limit_error(exc):
-                next_m = mgr.escalate_failure(target_model, exc)
-                if next_m is None:
-                    raise GeminiRateLimitError("All AI model preferences exhausted; shifting to Tier 0.") from exc
-                continue
-            raise
+            next_m = mgr.escalate_failure(target_model, exc)
+            if next_m is None:
+                raise GeminiRateLimitError(f"All AI model preferences exhausted; shifting to Tier 0. ({exc})") from exc
+            continue
 
 
 def tier2_evaluate(
@@ -480,7 +504,13 @@ Visual Evaluation Instructions:
                 ),
             )
         except Exception as e:
-            if "schema" in str(e).lower() or "invalid_argument" in str(e).lower() or "not supported" in str(e).lower():
+            if (
+                "schema" in str(e).lower()
+                or "invalid_argument" in str(e).lower()
+                or "not supported" in str(e).lower()
+                or getattr(e, "code", None) == 400
+                or getattr(e, "status_code", None) == 400
+            ):
                 response = client.models.generate_content(
                     model=model_name,
                     contents=[image_part, prompt + "\n\nCRITICAL: Respond ONLY with a valid JSON object matching the schema. No markdown formatting."],
@@ -507,12 +537,10 @@ Visual Evaluation Instructions:
         try:
             return _eval_with_model(target_model)
         except Exception as exc:
-            if _is_rate_limit_error(exc):
-                next_m = mgr.escalate_failure(target_model, exc)
-                if next_m is None:
-                    raise GeminiRateLimitError("All AI model preferences exhausted; shifting to Tier 0.") from exc
-                continue
-            raise
+            next_m = mgr.escalate_failure(target_model, exc)
+            if next_m is None:
+                raise GeminiRateLimitError(f"All AI model preferences exhausted; shifting to Tier 0. ({exc})") from exc
+            continue
 
 
 def _apply_confidence_gate(verdict: JudgeVerdict) -> JudgeVerdict:
@@ -542,11 +570,12 @@ def _safe_fallback(
     if tier0_verdict is not None:
         return replace(tier0_verdict, rate_limited=rate_limited)
     label = ctx.display_title or ctx.source_key or "current activity"
+    prefix = reason_prefix if "AI unavailable" in reason_prefix else f"AI unavailable - rules only; {reason_prefix}"
     return JudgeVerdict(
-        activity=f"Fallback: {label}",
+        activity=f"AI unavailable: {label}",
         on_task=True,
         confidence=0.0,
-        reason=f"{reason_prefix}; treating as on-task without punishing.",
+        reason=f"{prefix}; treating as on-task without punishing.",
         tabs_to_close=[],
         tier_used=0,
         from_cache=False,
@@ -578,11 +607,15 @@ def evaluate_context(
 
     # If all AI models are offline, shift exclusively to Tier 0 local rules
     if mgr.tier0_mode_active:
+        tier0_verdict = tier0_evaluate(ctx, profile, cache)
+        if tier0_verdict is not None:
+            reason = f"AI unavailable - rules only; {tier0_verdict.reason}"
+            return replace(tier0_verdict, reason=reason, rate_limited=True)
         return _safe_fallback(
             ctx,
             profile,
             cache,
-            "Tier 0 rules only mode active (all AI models offline)",
+            "AI unavailable - rules only (all AI models offline)",
             rate_limited=True,
         )
 
