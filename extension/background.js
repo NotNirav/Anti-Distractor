@@ -96,7 +96,11 @@ async function executeCommand(cmd) {
   }
 }
 
+let isPollingCommands = false;
+
 async function pollCommands() {
+  if (isPollingCommands) return;
+  isPollingCommands = true;
   try {
     const resp = await fetch(`${SERVER_BASE}/commands`);
     if (!resp.ok) return;
@@ -108,6 +112,8 @@ async function pollCommands() {
     }
   } catch {
     // Fail silently when server is unreachable
+  } finally {
+    isPollingCommands = false;
   }
 }
 
@@ -117,8 +123,8 @@ chrome.tabs.onActivated.addListener(() => {
   pollCommands();
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === "complete" || changeInfo.title || changeInfo.url) {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tab && tab.active && (changeInfo.status === "complete" || changeInfo.title || changeInfo.url)) {
     scheduleSnapshot("tab_updated");
     pollCommands();
   }

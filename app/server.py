@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -14,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from app.models import TabInfo, TabSnapshot, TriggerType
 from app.profile import normalize_domain
+
+logger = logging.getLogger(__name__)
 
 
 class TabSnapshotStore:
@@ -46,10 +49,11 @@ class CommandQueue:
         """Queue a close_tabs command and return its command_id."""
         with self._lock:
             cmd_id = f"cmd-{uuid.uuid4().hex[:8]}"
+            unique_ids = list(dict.fromkeys(int(t) for t in tab_ids))
             self._pending[cmd_id] = {
                 "command_id": cmd_id,
                 "action": "close_tabs",
-                "tab_ids": [int(tid) for tid in tab_ids],
+                "tab_ids": unique_ids,
                 "created_at": time.time(),
                 "in_flight_since": None,
             }
@@ -72,13 +76,13 @@ class CommandQueue:
             for c in self._pending.values():
                 if c["in_flight_since"] is None:
                     c["in_flight_since"] = now
-                result.append(
-                    {
-                        "command_id": c["command_id"],
-                        "action": c["action"],
-                        "tab_ids": c["tab_ids"],
-                    }
-                )
+                    result.append(
+                        {
+                            "command_id": c["command_id"],
+                            "action": c["action"],
+                            "tab_ids": c["tab_ids"],
+                        }
+                    )
             return result
 
     def ack_command(self, command_id: str) -> None:
@@ -124,7 +128,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -137,7 +141,7 @@ def create_app(
             try:
                 session_active, goal = session_status_provider()
             except Exception:
-                pass
+                logger.exception("Error in health status provider callback")
         return {"status": "ok", "session_active": session_active, "goal": goal}
 
     @app.post("/tabs")
@@ -183,7 +187,7 @@ def create_app(
             try:
                 on_tab_event(trigger)
             except Exception:
-                pass
+                logger.exception("Error in on_tab_event callback for trigger %s", trigger)
 
         return {"ok": True, "received_tabs": len(tab_list)}
 
@@ -205,6 +209,21 @@ def start_server_thread(app: FastAPI, host: str = "127.0.0.1", port: int = 8765)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+
+    # Wait up to 5.0 seconds for server.started
+    start_time = time.time()
+    while not getattr(server, "started", False):
+        if not thread.is_alive():
+            raise RuntimeError(
+                f"Server thread terminated unexpectedly. Port {port} is likely already in use."
+            )
+        if time.time() - start_time > 5.0:
+            server.should_exit = True
+            raise RuntimeError(
+                f"Server failed to start on http://{host}:{port} within 5.0 seconds. Port may be in use."
+            )
+        time.sleep(0.05)
+
     return server
 
 

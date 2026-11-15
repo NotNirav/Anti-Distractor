@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env file automatically
-load_dotenv()
+# Load .env from project root with override=True so local keys take precedence
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 
 @dataclass(frozen=True)

@@ -53,5 +53,13 @@
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
+- [Review Fix 1] Config: `load_dotenv` now explicitly resolves `.env` from project root with `override=True` to prevent accidental inheritance of ambient shell keys.
+- [Review Fix 2] Judge/Profile: Explicitly reject empty/whitespace API keys with `ValueError` in `tier1_evaluate`/`tier2_evaluate` and return `fallback_goal_profile` in `generate_goal_profile` to prevent silent ambient fallback.
+- [Review Fix 3] Judge: `generate_session_review` now catches all exceptions (including rate limits and invalid keys) and returns a deterministic local summary so session end never crashes.
+- [Review Fix 4] Server: `CommandQueue.poll_commands` now only appends commands that are newly transitioned to in-flight, preventing duplicate re-deliveries during extension polling, and `enqueue_close_tabs` deduplicates tab IDs.
+- [Review Fix 5] Extension: Prevent overlapping command polls via reentrancy lock `isPollingCommands`, and filter `tabs.onUpdated` to only trigger snapshots when the updated tab is active.
+- [Review Fix 6] Judge: `_parse_verdict_response` validates non-empty model responses and strictly filters `tabs_to_close` against currently known tab IDs to prevent closing non-existent tabs; narrowed `_is_rate_limit_error` to code 429 and RESOURCE_EXHAUSTED.
+- [Review Fix 7] Profile: `normalize_domain` now rejects non-web schemes (`file://`, `about:`, `chrome:`, `edge:`, etc.) and returns empty string to prevent polluting cache and Tier 0 domain matching.
+- [Review Fix 8] Server: Set CORS `allow_credentials=False` for wildcard origins, replaced silent exception pass in `/health` and `/tabs` callbacks with `logger.exception`, and added synchronous startup verification in `start_server_thread` to fail fast on port collision.
 
 ## Escalation suggestions

@@ -28,11 +28,26 @@ class _JudgeVerdictResponse(BaseModel):
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Check if an exception represents an HTTP 429 or Gemini quota exhaustion."""
-    msg = str(exc).lower()
     code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    if code == 429 or "429" in msg or "resource_exhausted" in msg or "quota" in msg or "rate limit" in msg:
-        return True
-    return False
+    return code == 429 or "RESOURCE_EXHAUSTED" in str(exc)
+
+
+def _parse_verdict_response(raw_text: str | None, ctx: ActivityContext, tier_used: int) -> JudgeVerdict:
+    """Parse and validate the JSON verdict string from Gemini, filtering out invented tab IDs."""
+    if not raw_text or not raw_text.strip():
+        raise ValueError(f"Empty response from Tier {tier_used} judge.")
+    parsed = _JudgeVerdictResponse.model_validate_json(raw_text)
+    valid_ids = {t.tab_id for t in ctx.tab_snapshot.tabs} if ctx.tab_snapshot and ctx.tab_snapshot.tabs else set()
+    return JudgeVerdict(
+        activity=parsed.activity,
+        on_task=parsed.on_task,
+        confidence=float(parsed.confidence),
+        reason=parsed.reason,
+        tabs_to_close=[t for t in (parsed.tabs_to_close or []) if t in valid_ids],
+        tier_used=tier_used,
+        from_cache=False,
+        rate_limited=False,
+    )
 
 
 def _format_context_text(ctx: ActivityContext, profile: GoalProfile) -> str:
@@ -86,6 +101,9 @@ def tier1_evaluate(
     api_key: str,
 ) -> JudgeVerdict:
     """Call Gemini text model with metadata and open tabs/windows; returns strict JSON verdict."""
+    if not api_key or not api_key.strip():
+        raise ValueError("GEMINI_API_KEY is missing or empty.")
+
     prompt = f"""You are the Anti-Distractor AI Judge. Your job is to evaluate whether the user is ON-TASK or OFF-TASK based on their stated goal and current desktop activity metadata.
 
 {_format_context_text(ctx, profile)}
@@ -109,17 +127,7 @@ Instructions:
                 response_schema=_JudgeVerdictResponse,
             ),
         )
-        data = json.loads(response.text)
-        return JudgeVerdict(
-            activity=data["activity"],
-            on_task=bool(data["on_task"]),
-            confidence=float(data["confidence"]),
-            reason=data["reason"],
-            tabs_to_close=[int(tid) for tid in data.get("tabs_to_close", [])],
-            tier_used=1,
-            from_cache=False,
-            rate_limited=False,
-        )
+        return _parse_verdict_response(response.text, ctx, tier_used=1)
     except Exception as e:
         if _is_rate_limit_error(e):
             raise GeminiRateLimitError(str(e)) from e
@@ -133,6 +141,9 @@ def tier2_evaluate(
     api_key: str,
 ) -> JudgeVerdict:
     """Call Gemini vision model with in-memory screenshot and context; returns strict JSON verdict."""
+    if not api_key or not api_key.strip():
+        raise ValueError("GEMINI_API_KEY is missing or empty.")
+
     prompt = f"""You are the Anti-Distractor AI Vision Judge.
 Analyze the user's live screen capture alongside their stated goal and system metadata to determine if they are on-task or distracted.
 
@@ -157,17 +168,7 @@ Visual Evaluation Instructions:
                 response_schema=_JudgeVerdictResponse,
             ),
         )
-        data = json.loads(response.text)
-        return JudgeVerdict(
-            activity=data["activity"],
-            on_task=bool(data["on_task"]),
-            confidence=float(data["confidence"]),
-            reason=data["reason"],
-            tabs_to_close=[int(tid) for tid in data.get("tabs_to_close", [])],
-            tier_used=2,
-            from_cache=False,
-            rate_limited=False,
-        )
+        return _parse_verdict_response(response.text, ctx, tier_used=2)
     except Exception as e:
         if _is_rate_limit_error(e):
             raise GeminiRateLimitError(str(e)) from e
@@ -193,16 +194,20 @@ def generate_session_review(
     api_key: str,
 ) -> str:
     """Summarize the session's text-only SQLite activity logs into a concise user review."""
+    total = len(logs)
+    on_task_count = sum(1 for l in logs if bool(l.get("on_task")))
+    pct = int((on_task_count / total) * 100) if total > 0 else 0
+    fallback_summary = f"Session summary for '{goal}' ({mode} mode): {pct}% on-task across {total} checks."
+
     if not logs:
         return f"Session completed for goal: '{goal}' ({mode} mode). No activity recorded."
 
+    if not api_key or not api_key.strip():
+        return fallback_summary
+
     log_lines = []
-    total = len(logs)
-    on_task_count = 0
     for l in logs:
         is_on = bool(l.get("on_task"))
-        if is_on:
-            on_task_count += 1
         t = l.get("timestamp", 0)
         app = l.get("app_or_domain", "")
         title = l.get("title", "")
@@ -229,9 +234,6 @@ Write an engaging, constructive, and concise post-session review for the user:
             model=GEMINI_VISION_MODEL,
             contents=prompt,
         )
-        return response.text.strip()
-    except Exception as e:
-        if _is_rate_limit_error(e):
-            raise GeminiRateLimitError(str(e)) from e
-        pct = int((on_task_count / total) * 100) if total > 0 else 0
-        return f"Session summary for '{goal}' ({mode} mode): {pct}% on-task across {total} checks."
+        return (response.text or "").strip() or fallback_summary
+    except Exception:
+        return fallback_summary

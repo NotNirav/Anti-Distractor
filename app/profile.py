@@ -25,23 +25,22 @@ class _GoalProfileResponse(BaseModel):
 
 
 def normalize_domain(url_or_domain: str) -> str:
-    """Extract lowercase root/host domain without scheme or leading www."""
+    """Extract lowercase root/host domain without scheme or leading www, ignoring non-web URLs."""
     raw = (url_or_domain or "").strip().lower()
     if not raw:
         return ""
+    if "://" not in raw and ":" in raw.split("/")[0] and not raw.split("/")[0].replace(".", "").replace(":", "").isdigit():
+        return ""  # about:, data:, chrome:, etc.
     if "://" not in raw:
         raw = "http://" + raw
     try:
         parsed = urlparse(raw)
-        host = parsed.netloc or parsed.path
-        # Remove port if present
-        host = host.split(":")[0].strip()
-        # Remove leading www.
-        if host.startswith("www."):
-            host = host[4:]
-        return host.strip("/").strip()
+        if parsed.scheme not in ("http", "https"):
+            return ""
+        host = (parsed.hostname or "").removeprefix("www.")
+        return host
     except Exception:
-        return url_or_domain.strip().lower()
+        return ""
 
 
 def normalize_title(title: str) -> str:
@@ -55,7 +54,7 @@ def normalize_title(title: str) -> str:
 
 def generate_goal_profile(goal: str, api_key: str) -> GoalProfile:
     """Call Gemini once at session start to expand a short goal into a GoalProfile."""
-    if not api_key:
+    if not api_key or not api_key.strip():
         return fallback_goal_profile(goal)
 
     prompt = f"""You are an expert focus and productivity assistant.
