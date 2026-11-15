@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -158,18 +159,62 @@ class AppController:
             except Exception:
                 pass
 
+    def _get_last_session_path(self) -> str:
+        db_dir = os.path.dirname(os.path.abspath(self.db_path))
+        return os.path.join(db_dir, "last_session.json")
+
+    def _load_last_session(self) -> dict[str, Any]:
+        try:
+            path = self._get_last_session_path()
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            logger.exception("Failed to load last_session.json")
+        return {}
+
+    def _save_last_session(self, goal: str, duration_minutes: int, mode: ModeType) -> None:
+        try:
+            path = self._get_last_session_path()
+            payload = {
+                "goal": goal,
+                "duration_minutes": duration_minutes,
+                "mode": mode,
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            logger.exception("Failed to save last_session.json")
+
     def start(self) -> None:
-        """Show the initial setup screen."""
+        """Show the initial setup screen, prefilled with last session if available."""
         root = getattr(self.ui, "root", None)
         if root is not None and hasattr(root, "protocol"):
             try:
                 root.protocol("WM_DELETE_WINDOW", self.shutdown)
             except Exception:
                 pass
-        self.ui.show_setup(on_start=self.start_session)
+
+        last_sess = self._load_last_session()
+        init_goal = last_sess.get("goal")
+        init_dur = last_sess.get("duration_minutes")
+        init_mode = last_sess.get("mode")
+
+        try:
+            self.ui.show_setup(
+                on_start=self.start_session,
+                initial_goal=init_goal,
+                initial_duration=init_dur,
+                initial_mode=init_mode,
+            )
+        except TypeError:
+            self.ui.show_setup(on_start=self.start_session)
 
     def start_session(self, goal: str, duration_minutes: int, mode: ModeType) -> None:
         """Show HUD immediately and initialize session components in a background thread."""
+        self._save_last_session(goal, duration_minutes, mode)
         with self._lock:
             if self.session_active or getattr(self, "_starting", False):
                 return

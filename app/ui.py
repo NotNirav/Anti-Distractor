@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 class UIHooks(Protocol):
     """Thread-safe interface used by the app controller to drive Tkinter screens."""
 
-    def show_setup(self, on_start: Callable[[str, int, ModeType], None]) -> None: ...
+    def show_setup(
+        self,
+        on_start: Callable[[str, int, ModeType], None],
+        initial_goal: str | None = None,
+        initial_duration: int | None = None,
+        initial_mode: ModeType | None = None,
+    ) -> None: ...
     def show_monitoring_hud(
         self,
         goal: str,
@@ -117,7 +123,13 @@ class TkinterUI:
                 pass
         self._current_frame = None
 
-    def show_setup(self, on_start: Callable[[str, int, ModeType], None]) -> None:
+    def show_setup(
+        self,
+        on_start: Callable[[str, int, ModeType], None],
+        initial_goal: str | None = None,
+        initial_duration: int | None = None,
+        initial_mode: ModeType | None = None,
+    ) -> None:
         """Render the goal/duration/mode setup screen with 'I'm ready' action."""
 
         def _action() -> None:
@@ -149,7 +161,8 @@ class TkinterUI:
             # Goal input
             goal_lbl = ttk.Label(frame, text="What is your goal?", font=("Segoe UI", 10, "bold"))
             goal_lbl.pack(anchor="w", pady=(0, 4))
-            goal_var = tk.StringVar(value="Study Data Structures and Algorithms")
+            goal_val_default = initial_goal if initial_goal is not None else "Study Data Structures and Algorithms"
+            goal_var = tk.StringVar(value=goal_val_default)
             goal_entry = ttk.Entry(frame, textvariable=goal_var, font=("Segoe UI", 10))
             goal_entry.pack(fill="x", pady=(0, 12))
 
@@ -158,7 +171,8 @@ class TkinterUI:
             dur_frame.pack(fill="x", pady=(0, 12))
             dur_lbl = ttk.Label(dur_frame, text="Duration (minutes):", font=("Segoe UI", 10, "bold"))
             dur_lbl.pack(side="left")
-            dur_var = tk.StringVar(value="25")
+            dur_val_default = str(initial_duration) if initial_duration is not None else "25"
+            dur_var = tk.StringVar(value=dur_val_default)
             dur_entry = ttk.Entry(dur_frame, textvariable=dur_var, width=8, font=("Segoe UI", 10))
             dur_entry.pack(side="left", padx=(10, 0))
 
@@ -166,7 +180,8 @@ class TkinterUI:
             mode_lbl = ttk.Label(frame, text="Enforcement Mode:", font=("Segoe UI", 10, "bold"))
             mode_lbl.pack(anchor="w", pady=(0, 4))
 
-            mode_var = tk.StringVar(value="strict")
+            mode_val_default = initial_mode if initial_mode in ("strict", "normal") else "strict"
+            mode_var = tk.StringVar(value=mode_val_default)
             mode_frame = ttk.Frame(frame)
             mode_frame.pack(fill="x", pady=(0, 16))
 

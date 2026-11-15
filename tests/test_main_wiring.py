@@ -17,9 +17,17 @@ class FakeUI:
         self.review_close_cb: Callable[[], None] | None = None
         self.hud_updates: list[tuple[AgentStateName, str]] = []
         self.reviews: list[str] = []
+        self.last_initial: tuple[Any, Any, Any] | None = None
 
-    def show_setup(self, on_start: Callable[[str, int, ModeType], None]) -> None:
+    def show_setup(
+        self,
+        on_start: Callable[[str, int, ModeType], None],
+        initial_goal: str | None = None,
+        initial_duration: int | None = None,
+        initial_mode: ModeType | None = None,
+    ) -> None:
         self.setup_cb = on_start
+        self.last_initial = (initial_goal, initial_duration, initial_mode)
 
     def show_monitoring_hud(
         self, goal: str, mode: ModeType, on_end_session: Callable[[], None]
@@ -192,3 +200,53 @@ def test_main_wiring_start_verdict_tick_lockout_and_stop(tmp_path: Path) -> None
     assert len(cancelled) >= 1
     assert len(ui.reviews) == 1
     assert "Study DSA" in ui.reviews[0]
+
+
+def test_remember_last_session_json_and_prefill(tmp_path: Path) -> None:
+    db_file = tmp_path / "test.db"
+    ui = FakeUI()
+
+    controller = AppController(
+        ui=ui,
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(db_file),
+        fake_judge=True,
+    )
+
+    # 1. Start setup before any saved session
+    controller.start()
+    assert ui.last_initial == (None, None, None)
+
+    # 2. Start a session with custom values
+    controller.start_session("Build Compiler", 45, "normal")
+    controller._stop_background_services()
+
+    # Verify last_session.json exists next to DB
+    last_json = tmp_path / "last_session.json"
+    assert last_json.is_file()
+
+    # 3. New controller instance starts and loads previous values
+    ui2 = FakeUI()
+    controller2 = AppController(
+        ui=ui2,
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(db_file),
+        fake_judge=True,
+    )
+    controller2.start()
+    assert ui2.last_initial == ("Build Compiler", 45, "normal")
+
+    # 4. Corrupting the file never crashes loading
+    last_json.write_text("invalid json syntax!!!", encoding="utf-8")
+    ui3 = FakeUI()
+    controller3 = AppController(
+        ui=ui3,
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(db_file),
+        fake_judge=True,
+    )
+    controller3.start()
+    assert ui3.last_initial == (None, None, None)
