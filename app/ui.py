@@ -381,6 +381,12 @@ class TkinterUI:
 
         for popup in list(self._active_popups):
             try:
+                auto_id = getattr(popup, "_auto_close_id", None)
+                if auto_id is not None:
+                    try:
+                        popup.after_cancel(auto_id)
+                    except Exception:
+                        pass
                 if popup.winfo_exists():
                     popup.destroy()
             except Exception:
@@ -535,6 +541,16 @@ class TkinterUI:
             )
             dismiss_btn.pack(side="right")
 
+            def _auto_close() -> None:
+                try:
+                    if win.winfo_exists():
+                        if win in self._active_popups:
+                            self._active_popups.remove(win)
+                        win.destroy()
+                except Exception:
+                    pass
+
+            win._auto_close_id = win.after(12000, _auto_close)
             win.protocol("WM_DELETE_WINDOW", self._hide_popups_and_overlay_now)
             self._active_popups.append(win)
 

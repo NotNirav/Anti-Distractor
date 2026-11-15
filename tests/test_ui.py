@@ -119,3 +119,36 @@ def test_ui_setup_start_button_state_and_failure_reenable():
             root.destroy()
         except Exception:
             pass
+
+
+def test_ui_layer2_warning_has_auto_close_and_layer1_stays():
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        ui = TkinterUI(root=root)
+        _flush_events(ui, root)
+
+        # Layer 1 popup
+        ui.show_layer1_popup("Goal A", "Reason A", on_choice=lambda c: None)
+        _flush_events(ui, root)
+        assert len(ui._active_popups) == 1
+        l1_win = ui._active_popups[0]
+        assert getattr(l1_win, "_auto_close_id", None) is None
+
+        # Layer 2 warning
+        ui.show_layer2_warning("Goal B", "Reason B")
+        _flush_events(ui, root)
+        assert len(ui._active_popups) == 1
+        l2_win = ui._active_popups[0]
+        assert getattr(l2_win, "_auto_close_id", None) is not None
+
+        # Hide popups cleans up cleanly
+        ui.hide_popups_and_overlay()
+        _flush_events(ui, root)
+        assert len(ui._active_popups) == 0
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
