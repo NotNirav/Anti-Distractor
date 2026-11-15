@@ -10,7 +10,7 @@
 - [x] **T2.2** (Flash) — Chrome/Edge Manifest V3 Extension (`done`)
 - [x] **T3.1** (Flash) — Windows Foreground Window Watcher & Minimize Helper (`done`)
 - [x] **T3.2** (Flash) — Verdict Cache & Tier 0 Rule Evaluator (`done`)
-- [ ] **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`todo`)
+- [x] **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`done`)
 - [ ] **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`todo`)
 - [ ] **T5.1** (Flash) — SQLite Session & Activity Logger (`todo`)
 - [ ] **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`todo`)
@@ -57,7 +57,12 @@
   - Implemented `VerdictCache` in `app/cache.py` with thread-safe locking, TTL expiry (1800s), normalized key generation (`source_key` and `title`), and `record_override`.
   - Implemented `tier0_evaluate` in `app/judge.py` with cache-first lookup, domain rule matching (`allowed_domains`, `blocked_domains`), app matching (`allowed_apps`, `blocked_apps`), and borderline domain passthrough to `None`.
   - Smoke tests passed: `instagram.com` -> on_task=False (tier 0, closes tab), `leetcode.com` -> on_task=True (tier 0), `youtube.com` -> None (borderline passthrough), `spotify.exe` -> on_task=False (tier 0), `code.exe` -> on_task=True (tier 0), user override -> on_task=True (cached), TTL expiration verified.
-- **Next up**: **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`app/event_engine.py`).
+- **T3.3 completed**:
+  - Implemented `evaluate_context` in `app/judge.py` with Tier 0 -> Tier 1 -> Tier 2 (`TIER1_ESCALATION_CONFIDENCE`) escalation, `force_vision` cache bypass, `PUNISH_CONFIDENCE_THRESHOLD` fairness gating, automatic `VerdictCache` writes, screenshot-failure fallback (to Tier 1 / safe on-task), and `GeminiRateLimitError` fallback to Tier 0 / safe on-task.
+  - Guarded `tier0_evaluate` domain matching on `foreground_window is None or foreground_window.is_browser` so background browser tabs don't trigger blocks when the user is in a non-browser app.
+  - Implemented `EventEngine` in `app/event_engine.py` with a single `threading.Condition` worker loop handling `baseline`, debounced `submit_trigger`, borderline `dwell` timer, periodic `heartbeat`, `run_immediate_check`, rate-limit backoff, exception isolation, and clean `start()`/`stop()`.
+  - Added 14 mocked unit/integration tests in `tests/test_event_engine.py` (all 14 passed in 1.05s) plus 1 live Tier 1 Gemini smoke test (`Red-Black Tree Insertion - GeeksforGeeks` -> `tier_used=1, on_task=True, confidence=0.95`).
+- **Next up**: **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`app/state_machine.py`).
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
@@ -69,5 +74,7 @@
 - [Review Fix 6] Judge: `_parse_verdict_response` validates non-empty model responses and strictly filters `tabs_to_close` against currently known tab IDs to prevent closing non-existent tabs; narrowed `_is_rate_limit_error` to code 429 and RESOURCE_EXHAUSTED.
 - [Review Fix 7] Profile: `normalize_domain` now rejects non-web schemes (`file://`, `about:`, `chrome:`, `edge:`, etc.) and returns empty string to prevent polluting cache and Tier 0 domain matching.
 - [Review Fix 8] Server: Set CORS `allow_credentials=False` for wildcard origins, replaced silent exception pass in `/health` and `/tabs` callbacks with `logger.exception`, and added synchronous startup verification in `start_server_thread` to fail fast on port collision.
+- [T3.3] `tier0_evaluate` in `app/judge.py` now skips `tab_snapshot` domain rules when `foreground_window.is_browser` is `False` so background browser tabs do not override an active allowed desktop app.
+- [T3.3] `EventEngine` in `app/event_engine.py` uses a single `threading.Condition` worker loop (with optional injectable test hooks) instead of multiple `threading.Timer` threads, and heartbeat checks preserve an active borderline dwell deadline so `dwell` can still fire when `heartbeat_seconds < dwell_seconds` (as in `DEV_TIMINGS`).
 
 ## Escalation suggestions

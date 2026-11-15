@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+import logging
 from typing import Any
 
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+import app.screen
 from app.cache import VerdictCache
-from app.config import GEMINI_TEXT_MODEL, GEMINI_VISION_MODEL
+from app.config import (
+    GEMINI_TEXT_MODEL,
+    GEMINI_VISION_MODEL,
+    PUNISH_CONFIDENCE_THRESHOLD,
+    SCREENSHOT_MAX_WIDTH,
+    TIER1_ESCALATION_CONFIDENCE,
+)
 from app.models import ActivityContext, GoalProfile, JudgeVerdict, ModeType
 from app.profile import normalize_domain
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiRateLimitError(Exception):
@@ -86,7 +97,7 @@ Browser Tabs:
 """
 
 
-def _domain_matches(domain: str, candidate_list: list[str]) -> bool:
+def domain_matches(domain: str, candidate_list: list[str]) -> bool:
     """Check if domain matches or is a subdomain of any domain in candidate_list."""
     norm = normalize_domain(domain) or domain.strip().lower()
     if not norm:
@@ -100,6 +111,9 @@ def _domain_matches(domain: str, candidate_list: list[str]) -> bool:
     return False
 
 
+_domain_matches = domain_matches
+
+
 def tier0_evaluate(
     ctx: ActivityContext,
     profile: GoalProfile,
@@ -111,16 +125,20 @@ def tier0_evaluate(
     if cached is not None:
         return cached
 
-    # 2. Check website domain rules
+    # 2. Check website domain rules (only when browser is focused or no foreground window info)
     source = (ctx.source_key or "").strip().lower()
+    is_browser_context = ctx.foreground_window is None or ctx.foreground_window.is_browser
     domain_candidate = ""
-    if ctx.tab_snapshot and ctx.tab_snapshot.tabs:
+    if is_browser_context and ctx.tab_snapshot and ctx.tab_snapshot.tabs:
         active_tab = next(
+            (t for t in ctx.tab_snapshot.tabs if t.tab_id == ctx.tab_snapshot.active_tab_id),
+            None,
+        ) or next(
             (t for t in ctx.tab_snapshot.tabs if t.active),
             ctx.tab_snapshot.tabs[0],
         )
         domain_candidate = active_tab.domain or normalize_domain(active_tab.url)
-    if not domain_candidate and not source.endswith(".exe"):
+    if not domain_candidate and is_browser_context and not source.endswith(".exe"):
         domain_candidate = normalize_domain(source) or source
 
     if domain_candidate:
@@ -271,6 +289,56 @@ Visual Evaluation Instructions:
         raise
 
 
+def _apply_confidence_gate(verdict: JudgeVerdict) -> JudgeVerdict:
+    """Never punish uncertainty: treat low-confidence off-task verdicts as on-task."""
+    if not verdict.on_task and verdict.confidence < PUNISH_CONFIDENCE_THRESHOLD:
+        return replace(
+            verdict,
+            on_task=True,
+            tabs_to_close=[],
+            reason=(
+                f"{verdict.reason} "
+                f"(Treated as on-task due to low confidence {verdict.confidence:.2f} < {PUNISH_CONFIDENCE_THRESHOLD:.2f})"
+            ).strip(),
+        )
+    return verdict
+
+
+def _safe_fallback(
+    ctx: ActivityContext,
+    profile: GoalProfile,
+    cache: VerdictCache,
+    reason_prefix: str,
+    rate_limited: bool = True,
+) -> JudgeVerdict:
+    """Fall back to Tier 0 rules, or safely treat unknown context as on-task."""
+    tier0_verdict = tier0_evaluate(ctx, profile, cache)
+    if tier0_verdict is not None:
+        return replace(tier0_verdict, rate_limited=rate_limited)
+    label = ctx.display_title or ctx.source_key or "current activity"
+    return JudgeVerdict(
+        activity=f"Fallback: {label}",
+        on_task=True,
+        confidence=0.0,
+        reason=f"{reason_prefix}; treating as on-task without punishing.",
+        tabs_to_close=[],
+        tier_used=0,
+        from_cache=False,
+        rate_limited=rate_limited,
+    )
+
+
+def _cache_if_confident(ctx: ActivityContext, verdict: JudgeVerdict, cache: VerdictCache) -> None:
+    """Cache Tier 1/2 verdicts that meet the confidence threshold."""
+    if (
+        not verdict.rate_limited
+        and verdict.tier_used in (1, 2)
+        and verdict.confidence >= PUNISH_CONFIDENCE_THRESHOLD
+        and (ctx.source_key or ctx.display_title)
+    ):
+        cache.put(ctx.source_key, ctx.display_title, verdict)
+
+
 def evaluate_context(
     ctx: ActivityContext,
     profile: GoalProfile,
@@ -279,8 +347,97 @@ def evaluate_context(
     force_vision: bool = False,
 ) -> JudgeVerdict:
     """Run Tier 0 -> Tier 1 -> Tier 2 escalation with confidence gating and rate-limit fallback."""
-    # TODO(T3.3): Implement tiered escalation, confidence threshold gating, cache write, and fallback.
-    raise NotImplementedError("TODO(T3.3): Implement evaluate_context")
+    if not force_vision:
+        tier0_verdict = tier0_evaluate(ctx, profile, cache)
+        if tier0_verdict is not None:
+            return _apply_confidence_gate(tier0_verdict)
+
+        try:
+            tier1_verdict = tier1_evaluate(ctx, profile, api_key)
+        except GeminiRateLimitError:
+            logger.warning("Rate limit hit during Tier 1 evaluation; using Tier 0 / on-task fallback.")
+            return _safe_fallback(
+                ctx, profile, cache, "Gemini API rate limit hit at Tier 1", rate_limited=True
+            )
+
+        if tier1_verdict.confidence < TIER1_ESCALATION_CONFIDENCE:
+            try:
+                screenshot_bytes = app.screen.capture_screenshot_bytes(
+                    max_width=SCREENSHOT_MAX_WIDTH
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Screenshot capture failed during Tier 2 escalation (%s); falling back to Tier 1.",
+                    exc,
+                )
+                gated = _apply_confidence_gate(tier1_verdict)
+                _cache_if_confident(ctx, gated, cache)
+                return gated
+
+            try:
+                tier2_verdict = tier2_evaluate(ctx, profile, screenshot_bytes, api_key)
+            except GeminiRateLimitError:
+                logger.warning("Rate limit hit during Tier 2 escalation; using Tier 0 / on-task fallback.")
+                return _safe_fallback(
+                    ctx, profile, cache, "Gemini API rate limit hit at Tier 2", rate_limited=True
+                )
+
+            final_verdict = _apply_confidence_gate(tier2_verdict)
+            _cache_if_confident(ctx, final_verdict, cache)
+            return final_verdict
+
+        final_verdict = _apply_confidence_gate(tier1_verdict)
+        _cache_if_confident(ctx, final_verdict, cache)
+        return final_verdict
+
+    # force_vision=True (baseline, dwell, heartbeat, manual_recheck): bypass cache and run Tier 2
+    try:
+        screenshot_bytes = app.screen.capture_screenshot_bytes(
+            max_width=SCREENSHOT_MAX_WIDTH
+        )
+    except Exception as exc:
+        logger.warning(
+            "Screenshot capture failed during forced vision check (%s); falling back to Tier 1.",
+            exc,
+        )
+        try:
+            tier1_verdict = tier1_evaluate(ctx, profile, api_key)
+            final_verdict = _apply_confidence_gate(tier1_verdict)
+            _cache_if_confident(ctx, final_verdict, cache)
+            return final_verdict
+        except GeminiRateLimitError:
+            logger.warning("Rate limit hit during Tier 1 fallback after screenshot failure.")
+            return _safe_fallback(
+                ctx,
+                profile,
+                cache,
+                "Screenshot failed and Tier 1 hit rate limit",
+                rate_limited=True,
+            )
+        except Exception as tier1_exc:
+            logger.warning(
+                "Tier 1 fallback failed after screenshot failure (%s); treating as on-task.",
+                tier1_exc,
+            )
+            return _safe_fallback(
+                ctx,
+                profile,
+                cache,
+                "Screenshot failed and Tier 1 unavailable",
+                rate_limited=False,
+            )
+
+    try:
+        tier2_verdict = tier2_evaluate(ctx, profile, screenshot_bytes, api_key)
+    except GeminiRateLimitError:
+        logger.warning("Rate limit hit during forced Tier 2 vision check; using Tier 0 / on-task fallback.")
+        return _safe_fallback(
+            ctx, profile, cache, "Gemini API rate limit hit at Tier 2", rate_limited=True
+        )
+
+    final_verdict = _apply_confidence_gate(tier2_verdict)
+    _cache_if_confident(ctx, final_verdict, cache)
+    return final_verdict
 
 
 def generate_session_review(
