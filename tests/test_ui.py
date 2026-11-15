@@ -89,3 +89,33 @@ def test_ui_setup_to_hud_to_review_lifecycle():
             root.destroy()
         except Exception:
             pass
+
+
+def test_ui_setup_start_button_state_and_failure_reenable():
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        ui = TkinterUI(root=root)
+        _flush_events(ui, root)
+
+        def failing_start(goal: str, duration: int, mode: str):
+            raise RuntimeError("Simulated startup crash")
+
+        ui.show_setup(on_start=failing_start)
+        _flush_events(ui, root)
+
+        assert ui._start_btn is not None
+        # Trigger start handler which will fail and re-enable button
+        from unittest.mock import patch
+        with patch("tkinter.messagebox.showerror"):
+            ui._setup_handle_start()
+            _flush_events(ui, root)
+
+        assert str(ui._start_btn.cget("state")) != "disabled"
+        assert "I'm Ready" in str(ui._start_btn.cget("text"))
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass

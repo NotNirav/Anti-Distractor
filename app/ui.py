@@ -208,15 +208,22 @@ class TkinterUI:
                     return
 
                 selected_mode: ModeType = "strict" if mode_var.get() == "strict" else "normal"
-                start_btn.config(state="disabled")
+                start_btn.config(state="disabled", text="Starting...")
                 status_lbl.config(text="Starting...")
-                on_start(goal_val, dur_val, selected_mode)
+                try:
+                    on_start(goal_val, dur_val, selected_mode)
+                except Exception as err:
+                    start_btn.config(state="normal", text="🚀 I'm Ready — Start Session")
+                    status_lbl.config(text=f"Failed to start: {err}")
+                    messagebox.showerror("Start Failed", f"Could not start session: {err}")
 
             start_btn = ttk.Button(
                 frame,
                 text="🚀 I'm Ready — Start Session",
                 command=_handle_start,
             )
+            self._start_btn = start_btn
+            self._setup_handle_start = _handle_start
             start_btn.pack(fill="x", ipady=4)
 
         self.dispatch(_action)
