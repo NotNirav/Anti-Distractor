@@ -6,8 +6,8 @@
 - [x] **T1.1** (Flash) — In-Memory Screenshot Capture & Downscaling (`done`)
 - [x] **T1.2** (Flash) — Goal Profile Generation & Normalization Helpers (`done`)
 - [x] **T1.3** (Flash) — Tier 1 Text Judge, Tier 2 Vision Judge, and Session Review AI Calls (`done`)
-- [ ] **T2.1** (Flash) — FastAPI Local Receiver and Command Queue (`todo`)
-- [ ] **T2.2** (Flash) — Chrome/Edge Manifest V3 Extension (`todo`)
+- [x] **T2.1** (Flash) — FastAPI Local Receiver and Command Queue (`done`)
+- [x] **T2.2** (Flash) — Chrome/Edge Manifest V3 Extension (`done`)
 - [ ] **T3.1** (Flash) — Windows Foreground Window Watcher & Minimize Helper (`todo`)
 - [ ] **T3.2** (Flash) — Verdict Cache & Tier 0 Rule Evaluator (`todo`)
 - [ ] **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`todo`)
@@ -37,7 +37,19 @@
   - Implemented `tier1_evaluate` (text-only AI evaluation with metadata and open tabs/windows), `tier2_evaluate` (multimodal AI evaluation combining live screenshot bytes and context), and `generate_session_review` in `app/judge.py`.
   - Added `GeminiRateLimitError` detection and clean propagation.
   - Acceptance tests passed: `tier1_evaluate` returned on-task verdict for Wikipedia BST article (`confidence: 0.95`); `tier2_evaluate` analyzed live desktop screenshot and recognized off-task IRCTC booking (`confidence: 0.98`, identified `tabs_to_close`); `generate_session_review` generated a comprehensive markdown focus report.
-- **Next up**: **T2.1** (Flash) — FastAPI Local Receiver and Command Queue (`app/server.py`).
+- **T2.1 completed**:
+  - Implemented `TabSnapshotStore` with thread-safe locking and automatic domain normalization.
+  - Implemented `CommandQueue` with UUID command generation, in-flight TTL expiry (15s), and acknowledgment tracking.
+  - Implemented FastAPI app with `GET /health`, `POST /tabs`, `GET /commands`, `POST /commands/ack`, and CORS support.
+  - Implemented `start_server_thread` to host uvicorn cleanly in a background daemon thread.
+  - Acceptance tests passed: verified all HTTP endpoints, event triggering, tab store updates, command queuing, and ack-clearing over localhost:8765.
+- **T2.2 completed**:
+  - Implemented Chrome/Edge Manifest V3 extension in `extension/` (`manifest.json`, `background.js`, `popup.html`, `popup.js`).
+  - Added listeners for `tabs.onActivated`, `tabs.onUpdated`, `tabs.onCreated`, `tabs.onRemoved`, and `windows.onFocusChanged` with micro-debouncing.
+  - Implemented 1.5s command polling loop with `chrome.alarms` keepalive fallback for service worker lifecycles.
+  - Implemented strict-mode `chrome.tabs.remove` execution and `/commands/ack` reporting.
+  - Verified syntax cleanly via Node.js and validated manifest schema.
+- **Next up**: **T3.1** (Flash) — Windows Foreground Window Watcher & Minimize Helper (`app/window_watcher.py`).
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
