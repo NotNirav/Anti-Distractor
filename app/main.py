@@ -44,6 +44,7 @@ def make_fake_judge(
             on_task=True,
             confidence=0.95,
             reason="Fake judge: on-task baseline.",
+            tabs_to_close=[],
             tier_used=1,
         ),
         JudgeVerdict(
@@ -51,6 +52,7 @@ def make_fake_judge(
             on_task=False,
             confidence=0.95,
             reason="Fake judge: off-task distraction.",
+            tabs_to_close=[],
             tier_used=1,
         ),
     ]

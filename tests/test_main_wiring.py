@@ -149,17 +149,22 @@ def test_main_wiring_start_verdict_tick_lockout_and_stop(tmp_path: Path) -> None
 
     # Verdict callback reaches state machine
     ctx = ActivityContext(
-        timestamp=1000.0,
         trigger_type="tab_activated",
+        goal="Study DSA",
         foreground_window=None,
         tab_snapshot=None,
-        open_window_titles=[],
+        open_windows=[],
+        source_key="instagram.com",
+        display_title="Instagram",
+        active_url="https://www.instagram.com/",
+        timestamp=1000.0,
     )
     verdict = JudgeVerdict(
         activity="Instagram",
         on_task=False,
         confidence=0.95,
         reason="Distracting site",
+        tabs_to_close=[],
         tier_used=0,
     )
     controller.engine.on_verdict(ctx, verdict)

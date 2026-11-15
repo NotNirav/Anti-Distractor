@@ -14,7 +14,7 @@
 - [x] **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`done`)
 - [x] **T5.1** (Flash) — SQLite Session & Activity Logger (`done`)
 - [x] **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`done`)
-- [ ] **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`todo`)
+- [x] **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`done`)
 - [ ] **T6.1** (Flash) — Dev/Demo Timing Verification, Error Hardening, and Demo Runbook (`todo`)
 
 ## Notes
