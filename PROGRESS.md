@@ -12,7 +12,7 @@
 - [x] **T3.2** (Flash) — Verdict Cache & Tier 0 Rule Evaluator (`done`)
 - [x] **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`done`)
 - [x] **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`done`)
-- [ ] **T5.1** (Flash) — SQLite Session & Activity Logger (`todo`)
+- [x] **T5.1** (Flash) — SQLite Session & Activity Logger (`done`)
 - [ ] **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`todo`)
 - [ ] **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`todo`)
 - [ ] **T6.1** (Flash) — Dev/Demo Timing Verification, Error Hardening, and Demo Runbook (`todo`)
@@ -63,7 +63,16 @@
   - Implemented `EventEngine` in `app/event_engine.py` with a single `threading.Condition` worker loop handling `baseline`, debounced `submit_trigger`, borderline `dwell` timer, periodic `heartbeat`, `run_immediate_check` (including pre-start sync exception isolation), rate-limit backoff, exception isolation, and clean `start()`/`stop()`.
   - Added 16 mocked unit/integration tests in `tests/test_event_engine.py` (covering Tier 0 no-AI, escalation, confidence gating, cache/force_vision, debounce, dwell & heartbeat with both real and mocked `clock_fn`, rate-limit backoff & recovery, screenshot failure, non-rate-limit exception fallbacks, and clean `stop()`) — all 16 passed via `python -m pytest tests -q` (`16 passed in 1.85s`), plus 1 earlier live Tier 1 Gemini smoke test.
   - Verified T3.3 against full checklist (triggers, debounce, Tier 0→1→2 escalation, low-confidence on-task gate, caching, rate-limit/screenshot/exception fallbacks, `on_verdict` callback, clean `start()`/`stop()`): no code gaps or test failures found.
-- **Next up**: **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`app/state_machine.py`).
+- **T4.1 completed**:
+  - Implemented `AgentStateMachine` in `app/state_machine.py` with Normal and Strict modes, handling strike counts, grace period, Layer 1 ask, user overrides ("relevant" and "back to work"), Layer 2 ultimatum, and safe side-effect dispatch.
+  - Implemented Strict mode enforcement: snapshot-validated tab closure filtering via `CommandQueue`, window minimization via `minimize_window`, and lockout timer expiry.
+  - Added 13 unit tests in `tests/test_state_machine.py` covering state transitions, override flows, deadlock safety, and lockout expiration without premature grace resets.
+- **T5.1 completed**:
+  - Implemented thread-safe `SessionLogger` in `app/logger.py` with scoped connection management and SQLite row mapping.
+  - Created `sessions` and `activity_logs` tables following `CONTRACTS.md` §7.
+  - Verified session start, text-only event logging, override marking, session finishing with review text, and ordered log fetching.
+  - Acceptance tests passed cleanly in `tests/test_logger.py` (`test_session_logger_lifecycle`).
+- **Next up**: **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`app/ui.py`).
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
