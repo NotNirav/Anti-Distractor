@@ -13,12 +13,19 @@ Unlike traditional site-blockers that rely on crude host blacklists or constant 
   - **Tier 0 (Local, 0ms, Free):** Instant local check against in-memory verdict cache, user overrides, and goal domain/app allow/block lists.
   - **Tier 1 (Gemini 3.5 Flash Lite, ~200ms):** Fast text-only metadata evaluation over open tabs, window titles, and goal intent.
   - **Tier 2 (Gemini 3.5 Flash Multimodal, ~700ms):** High-precision in-memory screen analysis for ambiguous content (e.g. YouTube videos, Reddit threads).
+- **Multi-Model Fallback Hierarchy & Graceful Degradation:**
+  - **Preference 1:** `gemini-3.5-flash-lite` (primary fast judge for text metadata and vision).
+  - **Preference 2:** `gemma-4-31b-it` (automatic failover on rate limits, 404, timeouts, or network exceptions).
+  - **Preference 3:** `gemma-4-26b-a4b-it` (tertiary fallback).
+  - **Last Resort (Tier 0 Shift):** If all AI models are unavailable, shifts cleanly to local rule-based matching with a one-time user alert and persistent `"AI unavailable - rules only"` HUD status.
 - **Privacy-First Design:** Desktop screenshots exist only in ephemeral RAM (`io.BytesIO`) during Tier 2 evaluation and are **never saved to disk**.
+- **Compact & Draggable Monitoring HUD:** Floating HUD showing current goal, mode badge, color-coded state, live activity summary, and live `"AI calls: T1 x / T2 y"` telemetry.
 - **Deterministic State Machine:**
-  - **Normal Mode:** Gentle nudges &mdash; initial Grace Period &rarr; Layer 1 Ask (*"Are you studying `<goal>`?"*) &rarr; Layer 2 Warning.
+  - **Normal Mode:** Gentle nudges &mdash; initial Grace Period &rarr; Layer 1 Ask (*"Are you studying `<goal>`?"*) &rarr; Layer 2 Warning (auto-closes after 12s).
   - **Strict Mode:** Nudges fail &rarr; closes offending browser tabs via extension commands, minimizes off-task desktop apps, and engages a full-screen lockout overlay.
 - **Fairness & Overrides:** User can click *"This is relevant"* to cache an immediate override. Low-confidence judgements (< 0.60) are never punished.
-- **Post-Session AI Review:** Stores text-only logs in SQLite and generates an end-of-session markdown report highlighting focus scores and distractions.
+- **Session Memory:** Remembers last goal, duration, and mode in local `last_session.json` to prefill the setup window.
+- **Post-Session AI Review:** Stores text-only logs in SQLite (with `model_used` attribution) and generates an end-of-session markdown report highlighting focus scores, distraction logs, and per-model check counts.
 
 ---
 
@@ -164,12 +171,13 @@ Anti-Distractor includes a comprehensive unit and integration test suite with fa
 python -m pytest tests -v
 ```
 
-All 35 tests pass with zero network or window dependencies:
+All 47 tests pass with zero network or window dependencies:
 - `tests/test_event_engine.py` (16 tests): Debounce, dwell, heartbeat, tier escalation, confidence gating, rate-limit backoff.
 - `tests/test_state_machine.py` (13 tests): State transitions, user overrides, disagreement fast-track, tab closure validation, lockout expiry.
-- `tests/test_logger.py` (1 test): SQLite session lifecycle, event logging, and override updates.
-- `tests/test_ui.py` (1 test): Tkinter thread-safe event queue pump, setup, HUD, and review screens.
-- `tests/test_main_wiring.py` (1 test): AppController cross-thread orchestration and lifecycle shutdown.
+- `tests/test_model_preferences.py` (6 tests): Preference failover (Gemini &rarr; Gemma 31B &rarr; Gemma 4 26B A4B), 404/timeouts/network errors, markdown fence stripping, Tier 0 shift popup & HUD status.
+- `tests/test_logger.py` (2 tests): SQLite session lifecycle, event logging, override updates, `model_used` column storage, and legacy DB ALTER TABLE migration.
+- `tests/test_ui.py` (5 tests): Tkinter thread-safe event queue pump, setup, HUD draggability, AI call counter, auto-close timers, and review screens.
+- `tests/test_main_wiring.py` (2 tests): AppController cross-thread orchestration, lifecycle shutdown, and last session persistence.
 - `tests/test_demo_runbook.py` (3 tests): Full 6-step demo walkthrough, timing presets, and extension disconnect resilience.
 
 ---
