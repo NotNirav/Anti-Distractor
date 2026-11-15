@@ -78,7 +78,12 @@
   - Built the compact topmost monitoring HUD (goal title, mode badge, color-coded state badge, latest activity summary, and "End Session" action).
   - Built the scrollable AI Session Review window with markdown formatting support and clean close action.
   - Verified via `tests/test_ui.py` and standalone test harness (`ALL 31 TESTS PASSED`).
-- **Next up**: **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`app/ui.py`, `app/main.py`).
+- **T5.3 completed**:
+  - Implemented Layer 1 popup ("Back to work" / "This is relevant"), Layer 2 warning popup with alert sound, and Strict-mode full-screen topmost dark overlay (`show_strict_overlay`) with live countdown and demo emergency escape hatch (`Esc` / `F12`) in `app/ui.py`.
+  - Implemented `AppController` in `app/main.py` orchestrating `Config`, `SessionLogger`, `TabSnapshotStore`, `CommandQueue`, `WindowWatcher`, `EventEngine`, `AgentStateMachine`, and `TkinterUI` across background threads and main Tkinter GUI loop.
+  - Added zero-quota fake judge support (`ANTI_DISTRACTOR_FAKE_JUDGE=1`) for local offline validation and rehearsed demos.
+  - Verified via `tests/test_main_wiring.py` covering session start, tab/window event triggers, state machine decisions, override propagation, and session completion review (`ALL 32 TESTS PASSED`).
+- **Next up**: **T6.1** (Flash) — Dev/Demo Timing Verification, Error Hardening, and Demo Runbook (`README.md`).
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
@@ -110,4 +115,4 @@
 - **Summary:** Implemented `_enforce_strict_mode`, snapshot-validated tab closing (`_resolve_tabs_to_close`), non-browser foreground window minimization (`_resolve_minimize_hwnd` + `minimize_window`), strict lockout expiry in `handle_tick`, `complete_lockout()` for overlay timer/demo escape hatch completion, and resilient side-effect dispatch (`_dispatch_side_effects`).
 - **Deviations:** Added optional `minimize_fn` and `on_lockout_done` constructor parameters plus `complete_lockout()` on `AgentStateMachine` (backwards-compatible with `CONTRACTS.md`) so `UIHooks.show_strict_overlay` completion/escape hatch and `EventEngine.run_immediate_check` can cleanly terminate strict lockout and test safely without Win32 side effects.
 - **Test result:** Passed custom T4.1 Normal + Strict mode acceptance test (`ALL T4.1 ACCEPTANCE TESTS PASSED`, exit code 0) covering snapshot tab-ID filtering, active-tab fallback, non-browser minimize, tick/on-task/escape-hatch lockout ending, and missing/raising queue/window/snapshot resilience.
-- **What's left:** Phase 5 (`T5.1`–`T5.3`) and Phase 6 (`T6.1`).
+- **What's left:** Phase 6 (`T6.1`).
