@@ -1,0 +1,22 @@
+# Secrets & environment
+.env
+.venv/
+venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local SQLite database & logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

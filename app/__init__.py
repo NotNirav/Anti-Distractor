@@ -1,0 +1,1 @@
+"""Anti-Distractor application package."""
