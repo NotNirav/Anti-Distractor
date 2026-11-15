@@ -282,8 +282,8 @@ class AgentStateMachine:
                 and self._lockout_deadline is not None
                 and current_time >= self._lockout_deadline
             ):
-                decision, ui_action = self._clear_lockout_locked(
-                    "Strict-mode lockout expired."
+                decision, ui_action = self._expire_lockout_locked(
+                    "Strict-mode lockout expired; awaiting verification."
                 )
                 lockout_completed = True
 
@@ -298,8 +298,8 @@ class AgentStateMachine:
         with self._lock:
             if self._state != "LAYER_2_ULTIMATUM" or self._lockout_deadline is None:
                 return None
-            decision, ui_action = self._clear_lockout_locked(
-                "Strict-mode lockout ended."
+            decision, ui_action = self._expire_lockout_locked(
+                "Strict-mode lockout ended; awaiting verification."
             )
 
         self._dispatch_side_effects(decision, ui_action)
@@ -424,23 +424,21 @@ class AgentStateMachine:
         self._dispatch_side_effects(decision, ("hide", decision.message))
         return decision
 
-    def _clear_lockout_locked(
+    def _expire_lockout_locked(
         self, message: str
     ) -> tuple[AgentDecision, tuple[str, str]]:
-        """Clear strict-mode lockout and return to ON_TASK (must hold self._lock)."""
+        """Expire strict-mode lockout countdown without resetting strikes or state (must hold self._lock)."""
         self._lockout_deadline = None
         self._grace_deadline = None
-        self._strikes = 0
-        self._last_off_task_ctx = None
-        self._last_off_task_verdict = None
-        self._state = "ON_TASK"
+        # Do not reset strikes or state to ON_TASK; remain in LAYER_2_ULTIMATUM until immediate check verifies on-task.
         decision = AgentDecision(
-            state="ON_TASK",
-            action_taken="cleared",
+            state="LAYER_2_ULTIMATUM",
+            action_taken="none",
             message=message,
             tabs_to_close=[],
+            lockout_seconds=0.0,
         )
-        return decision, ("hide", message)
+        return decision, ("hud", message)
 
     def _transition_to_layer2_locked(
         self,

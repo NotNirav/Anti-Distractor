@@ -77,6 +77,7 @@
 - [Review Fix 8] Server: Set CORS `allow_credentials=False` for wildcard origins, replaced silent exception pass in `/health` and `/tabs` callbacks with `logger.exception`, and added synchronous startup verification in `start_server_thread` to fail fast on port collision.
 - [T3.3] `tier0_evaluate` in `app/judge.py` now skips `tab_snapshot` domain rules when `foreground_window.is_browser` is `False` so background browser tabs do not override an active allowed desktop app.
 - [T3.3] `EventEngine` in `app/event_engine.py` uses a single `threading.Condition` worker loop (with optional injectable test hooks) instead of multiple `threading.Timer` threads, and heartbeat checks preserve an active borderline dwell deadline so `dwell` can still fire when `heartbeat_seconds < dwell_seconds` (as in `DEV_TIMINGS`).
+- [T4.1 Post-Review] In `app/state_machine.py`, strict lockout expiration now preserves state in `LAYER_2_ULTIMATUM` and retains strike count without prematurely resetting to `ON_TASK` or granting a new grace period. When `on_lockout_done` triggers an immediate check, an on-task verdict resets to `ON_TASK` and clears warnings, while an off-task verdict returns immediately to Layer 2 strict enforcement.
 
 ## Escalation suggestions
 
