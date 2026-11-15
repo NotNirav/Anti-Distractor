@@ -87,3 +87,11 @@
 - **Tests:** Not run (tool-call budget reserved for implementation and progress update per task limits).
 - **Deviations:** Added optional `ui_hooks: UIHooks | None = None`, `clock: Callable[[], float] = time.monotonic`, and `on_override` parameters (and defaulted `command_queue` and `on_decision` to `None`) in `AgentStateMachine.__init__` so the state machine drives `UIHooks` directly and supports injectable clocks in tests while keeping `CONTRACTS.md` compatibility.
 - **What's left:** T4.1 Step 2 — implement strict-mode enforcement inside `AgentStateMachine._enforce_strict_mode`.
+
+### T4.1 (Step 2 of 2) — Strict Mode Enforcement [DONE]
+- **Status:** Completed
+- **Files changed:** `app/state_machine.py`
+- **Summary:** Implemented `_enforce_strict_mode`, snapshot-validated tab closing (`_resolve_tabs_to_close`), non-browser foreground window minimization (`_resolve_minimize_hwnd` + `minimize_window`), strict lockout expiry in `handle_tick`, `complete_lockout()` for overlay timer/demo escape hatch completion, and resilient side-effect dispatch (`_dispatch_side_effects`).
+- **Deviations:** Added optional `minimize_fn` and `on_lockout_done` constructor parameters plus `complete_lockout()` on `AgentStateMachine` (backwards-compatible with `CONTRACTS.md`) so `UIHooks.show_strict_overlay` completion/escape hatch and `EventEngine.run_immediate_check` can cleanly terminate strict lockout and test safely without Win32 side effects.
+- **Test result:** Passed custom T4.1 Normal + Strict mode acceptance test (`ALL T4.1 ACCEPTANCE TESTS PASSED`, exit code 0) covering snapshot tab-ID filtering, active-tab fallback, non-browser minimize, tick/on-task/escape-hatch lockout ending, and missing/raising queue/window/snapshot resilience.
+- **What's left:** Phase 5 (`T5.1`–`T5.3`) and Phase 6 (`T6.1`).

@@ -19,6 +19,12 @@ from app.models import (
 )
 from app.server import CommandQueue
 
+try:
+    from app.window_watcher import minimize_window
+except Exception:  # pragma: no cover - safe fallback if pywin32 is unavailable
+    def minimize_window(hwnd: int) -> bool:
+        return False
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +68,8 @@ class AgentStateMachine:
         ui_hooks: UIHooks | None = None,
         clock: Callable[[], float] = time.monotonic,
         on_override: Callable[[ActivityContext | None, str], None] | None = None,
+        minimize_fn: Callable[[int], bool] | None = None,
+        on_lockout_done: Callable[[], None] | None = None,
     ) -> None:
         self.goal = goal
         self.mode: ModeType = mode
@@ -72,11 +80,14 @@ class AgentStateMachine:
         self.ui_hooks = ui_hooks
         self._clock = clock
         self.on_override = on_override
+        self._minimize_fn = minimize_fn
+        self.on_lockout_done = on_lockout_done
 
         self._lock = threading.RLock()
         self._state: AgentStateName = "IDLE"
         self._strikes: int = 0
         self._grace_deadline: float | None = None
+        self._lockout_deadline: float | None = None
         self._last_off_task_ctx: ActivityContext | None = None
         self._last_off_task_verdict: JudgeVerdict | None = None
         self._pending_overrides: set[tuple[str, str]] = set()
@@ -134,6 +145,7 @@ class AgentStateMachine:
                 prev_state = self._state
                 self._strikes = 0
                 self._grace_deadline = None
+                self._lockout_deadline = None
                 self._last_off_task_ctx = None
                 self._last_off_task_verdict = None
                 if not from_cache and cache_key in self._pending_overrides:
@@ -169,7 +181,7 @@ class AgentStateMachine:
                     self._grace_deadline = None
                     self._strikes = max(self._strikes + 1, 2)
                     decision, ui_action = self._transition_to_layer2_locked(
-                        ctx, sanitized_verdict, reason
+                        ctx, sanitized_verdict, reason, now=now
                     )
                 elif self._state in ("IDLE", "ON_TASK"):
                     grace_seconds = self._safe_grace_seconds()
@@ -205,11 +217,27 @@ class AgentStateMachine:
                             tabs_to_close=[],
                         )
                 elif self._state in ("LAYER_1_ASK", "LAYER_2_ULTIMATUM"):
-                    self._grace_deadline = None
-                    self._strikes += 1
-                    decision, ui_action = self._transition_to_layer2_locked(
-                        ctx, sanitized_verdict, reason
-                    )
+                    if (
+                        self._state == "LAYER_2_ULTIMATUM"
+                        and self.mode == "strict"
+                        and self._lockout_deadline is not None
+                        and now < self._lockout_deadline
+                    ):
+                        remaining = max(0.0, self._lockout_deadline - now)
+                        decision = AgentDecision(
+                            state="LAYER_2_ULTIMATUM",
+                            action_taken="none",
+                            message=f"Strict lockout active ({reason}).",
+                            tabs_to_close=[],
+                            minimize_hwnd=None,
+                            lockout_seconds=remaining,
+                        )
+                    else:
+                        self._grace_deadline = None
+                        self._strikes += 1
+                        decision, ui_action = self._transition_to_layer2_locked(
+                            ctx, sanitized_verdict, reason, now=now
+                        )
                 else:
                     decision = AgentDecision(
                         state=self._state,
@@ -226,6 +254,7 @@ class AgentStateMachine:
         current_time = self._now(now)
         ui_action: tuple[str, str] | None = None
         decision: AgentDecision | None = None
+        lockout_completed = False
 
         with self._lock:
             if self._state == "ENDED":
@@ -248,9 +277,33 @@ class AgentStateMachine:
                     message=message,
                     tabs_to_close=[],
                 )
+            elif (
+                self._state == "LAYER_2_ULTIMATUM"
+                and self._lockout_deadline is not None
+                and current_time >= self._lockout_deadline
+            ):
+                decision, ui_action = self._clear_lockout_locked(
+                    "Strict-mode lockout expired."
+                )
+                lockout_completed = True
 
         if decision is not None:
             self._dispatch_side_effects(decision, ui_action)
+            if lockout_completed:
+                self._notify_lockout_done()
+        return decision
+
+    def complete_lockout(self) -> AgentDecision | None:
+        """End an active strict-mode lockout (timer completion or demo escape hatch)."""
+        with self._lock:
+            if self._state != "LAYER_2_ULTIMATUM" or self._lockout_deadline is None:
+                return None
+            decision, ui_action = self._clear_lockout_locked(
+                "Strict-mode lockout ended."
+            )
+
+        self._dispatch_side_effects(decision, ui_action)
+        self._notify_lockout_done()
         return decision
 
     def handle_user_action(
@@ -277,6 +330,7 @@ class AgentStateMachine:
                 self._state = "ON_TASK"
                 self._strikes = 0
                 self._grace_deadline = None
+                self._lockout_deadline = None
                 self._last_off_task_ctx = None
                 self._last_off_task_verdict = None
                 decision = AgentDecision(
@@ -308,6 +362,7 @@ class AgentStateMachine:
                 self._state = "ON_TASK"
                 self._strikes = 0
                 self._grace_deadline = None
+                self._lockout_deadline = None
                 self._last_off_task_ctx = None
                 self._last_off_task_verdict = None
                 decision = AgentDecision(
@@ -355,6 +410,7 @@ class AgentStateMachine:
             self._state = "ENDED"
             self._strikes = 0
             self._grace_deadline = None
+            self._lockout_deadline = None
             self._last_off_task_ctx = None
             self._last_off_task_verdict = None
             self._pending_overrides.clear()
@@ -368,16 +424,36 @@ class AgentStateMachine:
         self._dispatch_side_effects(decision, ("hide", decision.message))
         return decision
 
+    def _clear_lockout_locked(
+        self, message: str
+    ) -> tuple[AgentDecision, tuple[str, str]]:
+        """Clear strict-mode lockout and return to ON_TASK (must hold self._lock)."""
+        self._lockout_deadline = None
+        self._grace_deadline = None
+        self._strikes = 0
+        self._last_off_task_ctx = None
+        self._last_off_task_verdict = None
+        self._state = "ON_TASK"
+        decision = AgentDecision(
+            state="ON_TASK",
+            action_taken="cleared",
+            message=message,
+            tabs_to_close=[],
+        )
+        return decision, ("hide", message)
+
     def _transition_to_layer2_locked(
         self,
         ctx: ActivityContext | None,
         verdict: JudgeVerdict,
         reason: str,
+        now: float | None = None,
     ) -> tuple[AgentDecision, tuple[str, str]]:
         """Enter LAYER_2_ULTIMATUM (must be called with self._lock held)."""
         self._state = "LAYER_2_ULTIMATUM"
         if self.mode == "strict":
-            return self._enforce_strict_mode(ctx, verdict, reason)
+            return self._enforce_strict_mode(ctx, verdict, reason, now=now)
+        self._lockout_deadline = None
         decision = AgentDecision(
             state="LAYER_2_ULTIMATUM",
             action_taken="warn_popup",
@@ -391,30 +467,45 @@ class AgentStateMachine:
         ctx: ActivityContext | None,
         verdict: JudgeVerdict,
         reason: str,
+        now: float | None = None,
     ) -> tuple[AgentDecision, tuple[str, str]]:
-        """Plug-in point for Step 2 strict-mode enforcement.
-
-        TODO(T4.1-step-2): Queue close_tabs in self.command_queue for browser tabs,
-        resolve minimize_hwnd for non-browser foreground windows, set lockout_seconds,
-        and trigger UIHooks.show_strict_overlay.
-        """
-        logger.warning(
-            "Strict-mode enforcement is not implemented yet (Step 2); falling back to Layer 2 warning."
-        )
+        """Compute strict-mode enforcement actions and lockout deadline (must hold self._lock)."""
+        current_time = self._now(now)
+        lockout_seconds = self._safe_lockout_seconds()
+        self._lockout_deadline = current_time + lockout_seconds
+        tabs_to_close = self._resolve_tabs_to_close(ctx, verdict)
+        minimize_hwnd = self._resolve_minimize_hwnd(ctx)
         decision = AgentDecision(
             state="LAYER_2_ULTIMATUM",
-            action_taken="warn_popup",
+            action_taken="strict_block",
             message=reason,
-            tabs_to_close=[],
+            tabs_to_close=tabs_to_close,
+            minimize_hwnd=minimize_hwnd,
+            lockout_seconds=lockout_seconds,
         )
-        return decision, ("layer2", reason)
+        return decision, ("strict", reason)
 
     def _dispatch_side_effects(
         self,
         decision: AgentDecision,
         ui_action: tuple[str, str] | None,
     ) -> None:
-        """Invoke UI hooks and on_decision outside self._lock to prevent deadlocks."""
+        """Invoke command queue, window minimize, UI hooks, and callbacks outside self._lock."""
+        if decision.action_taken == "strict_block":
+            if decision.tabs_to_close and self.command_queue is not None:
+                if hasattr(self.command_queue, "enqueue_close_tabs"):
+                    try:
+                        self.command_queue.enqueue_close_tabs(decision.tabs_to_close)
+                    except Exception:
+                        logger.exception("Failed to enqueue close_tabs command")
+            if decision.minimize_hwnd is not None:
+                try:
+                    self._minimize_window(decision.minimize_hwnd)
+                except Exception:
+                    logger.exception(
+                        "Failed to minimize window hwnd=%r", decision.minimize_hwnd
+                    )
+
         if self.ui_hooks is not None and ui_action is not None:
             kind, payload = ui_action
             try:
@@ -426,6 +517,13 @@ class AgentStateMachine:
                     )
                 elif kind == "layer2" and hasattr(self.ui_hooks, "show_layer2_warning"):
                     self.ui_hooks.show_layer2_warning(self.goal, payload)
+                elif kind == "strict" and hasattr(self.ui_hooks, "show_strict_overlay"):
+                    self.ui_hooks.show_strict_overlay(
+                        self.goal,
+                        payload,
+                        decision.lockout_seconds,
+                        self.complete_lockout,
+                    )
                 elif kind == "hide" and hasattr(
                     self.ui_hooks, "hide_popups_and_overlay"
                 ):
@@ -441,6 +539,17 @@ class AgentStateMachine:
                 self.on_decision(decision)
             except Exception:
                 logger.exception("on_decision callback failed")
+
+    def _minimize_window(self, hwnd: int) -> bool:
+        fn = self._minimize_fn if self._minimize_fn is not None else minimize_window
+        return bool(fn(hwnd))
+
+    def _notify_lockout_done(self) -> None:
+        if self.on_lockout_done is not None:
+            try:
+                self.on_lockout_done()
+            except Exception:
+                logger.exception("on_lockout_done callback failed")
 
     def _now(self, override: float | None = None) -> float:
         if (
@@ -464,6 +573,83 @@ class AgentStateMachine:
             return val if math.isfinite(val) and val >= 0.0 else 0.0
         except Exception:
             return 0.0
+
+    def _safe_lockout_seconds(self) -> float:
+        try:
+            val = float(getattr(self.timings, "strict_lockout_seconds", 0.0))
+            return val if math.isfinite(val) and val >= 0.0 else 0.0
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _resolve_tabs_to_close(
+        ctx: ActivityContext | None, verdict: JudgeVerdict
+    ) -> list[int]:
+        if ctx is None:
+            return []
+        snapshot = getattr(ctx, "tab_snapshot", None)
+        if snapshot is None:
+            return []
+        snapshot_tabs = getattr(snapshot, "tabs", None)
+        if not isinstance(snapshot_tabs, (list, tuple)) or not snapshot_tabs:
+            return []
+
+        valid_tab_ids: set[int] = set()
+        active_snapshot_tab_id: int | None = None
+        for tab in snapshot_tabs:
+            tid = getattr(tab, "tab_id", None)
+            if isinstance(tid, int) and not isinstance(tid, bool):
+                valid_tab_ids.add(tid)
+                if active_snapshot_tab_id is None and bool(getattr(tab, "active", False)):
+                    active_snapshot_tab_id = tid
+
+        if not valid_tab_ids:
+            return []
+
+        tabs_to_close: list[int] = []
+        seen: set[int] = set()
+        for tid in getattr(verdict, "tabs_to_close", []) or []:
+            if isinstance(tid, int) and not isinstance(tid, bool):
+                if tid in valid_tab_ids and tid not in seen:
+                    tabs_to_close.append(tid)
+                    seen.add(tid)
+
+        if tabs_to_close:
+            return tabs_to_close
+
+        fg = getattr(ctx, "foreground_window", None)
+        is_browser_active = (
+            bool(getattr(fg, "is_browser", False))
+            if fg is not None
+            else bool(getattr(snapshot, "window_focused", False))
+        )
+        if not is_browser_active:
+            return []
+
+        snap_active_id = getattr(snapshot, "active_tab_id", None)
+        if (
+            isinstance(snap_active_id, int)
+            and not isinstance(snap_active_id, bool)
+            and snap_active_id in valid_tab_ids
+        ):
+            return [snap_active_id]
+        if active_snapshot_tab_id is not None and active_snapshot_tab_id in valid_tab_ids:
+            return [active_snapshot_tab_id]
+        return []
+
+    @staticmethod
+    def _resolve_minimize_hwnd(ctx: ActivityContext | None) -> int | None:
+        if ctx is None:
+            return None
+        fg = getattr(ctx, "foreground_window", None)
+        if fg is None:
+            return None
+        if bool(getattr(fg, "is_browser", False)):
+            return None
+        hwnd = getattr(fg, "hwnd", None)
+        if isinstance(hwnd, int) and not isinstance(hwnd, bool) and hwnd > 0:
+            return hwnd
+        return None
 
     def _extract_last_reason(self) -> str:
         if self._last_off_task_verdict is not None:
