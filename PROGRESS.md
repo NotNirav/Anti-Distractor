@@ -79,3 +79,11 @@
 - [T3.3] `EventEngine` in `app/event_engine.py` uses a single `threading.Condition` worker loop (with optional injectable test hooks) instead of multiple `threading.Timer` threads, and heartbeat checks preserve an active borderline dwell deadline so `dwell` can still fire when `heartbeat_seconds < dwell_seconds` (as in `DEV_TIMINGS`).
 
 ## Escalation suggestions
+
+
+## T4.1 (Step 1 of 2) — Core Agent State Machine
+- **Status:** Done (Step 1 of 2; Step 2 strict-mode enforcement pending).
+- **Files changed:** [app/state_machine.py](file:///D:/Computer%20Programming/Hackathons/Upcomming/Agentix%202.0/Anti-Distractor/app/state_machine.py).
+- **Tests:** Not run (tool-call budget reserved for implementation and progress update per task limits).
+- **Deviations:** Added optional `ui_hooks: UIHooks | None = None`, `clock: Callable[[], float] = time.monotonic`, and `on_override` parameters (and defaulted `command_queue` and `on_decision` to `None`) in `AgentStateMachine.__init__` so the state machine drives `UIHooks` directly and supports injectable clocks in tests while keeping `CONTRACTS.md` compatibility.
+- **What's left:** T4.1 Step 2 — implement strict-mode enforcement inside `AgentStateMachine._enforce_strict_mode`.
