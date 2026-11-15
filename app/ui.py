@@ -42,6 +42,7 @@ class UIHooks(Protocol):
         on_lockout_done: Callable[[], None],
     ) -> None: ...
     def hide_popups_and_overlay(self) -> None: ...
+    def show_tier0_shift_popup(self, message: str) -> None: ...
     def show_review(self, review_text: str, on_close: Callable[[], None]) -> None: ...
 
 
@@ -527,6 +528,60 @@ class TkinterUI:
             dismiss_btn.pack(side="right")
 
             win.protocol("WM_DELETE_WINDOW", self._hide_popups_and_overlay_now)
+            self._active_popups.append(win)
+
+        self.dispatch(_action)
+
+    def show_tier0_shift_popup(self, message: str) -> None:
+        """Display a warning dialog that AI models are unavailable and shifting to Tier 0 rules only."""
+
+        def _action() -> None:
+            win = tk.Toplevel(self.root)
+            win.title("Anti-Distractor — AI Shift Notice")
+            win.attributes("-topmost", True)
+            win.resizable(False, False)
+
+            width, height = 480, 240
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            x = max(0, (screen_w - width) // 2)
+            y = max(0, (screen_h - height) // 3)
+            win.geometry(f"{width}x{height}+{x}+{y}")
+
+            banner = tk.Frame(win, bg="#D32F2F", padx=16, pady=10)
+            banner.pack(fill="x")
+            tk.Label(
+                banner,
+                text="⚠️ AI Models Offline — Tier 0 Active",
+                font=("Segoe UI", 12, "bold"),
+                bg="#D32F2F",
+                fg="#FFFFFF",
+            ).pack(anchor="w")
+
+            body = ttk.Frame(win, padding="16 14 16 14")
+            body.pack(fill="both", expand=True)
+
+            ttk.Label(
+                body,
+                text=(
+                    message
+                    or "All AI models (Gemini 3.5 Flash-Lite, Gemma 31B, Gemma 24B) are currently experiencing "
+                    "quota limits or high demand.\n\n"
+                    "Anti-Distractor has shifted to Tier 0 local rules only (allowed/blocked domain and app lists) "
+                    "to maintain your focus protection until an AI model becomes available."
+                ),
+                font=("Segoe UI", 9),
+                wraplength=440,
+                justify="left",
+            ).pack(anchor="w", pady=(0, 14))
+
+            btn = ttk.Button(
+                body,
+                text="Understood (Continue with Tier 0 Rules)",
+                command=win.destroy,
+            )
+            btn.pack(side="right")
+
             self._active_popups.append(win)
 
         self.dispatch(_action)

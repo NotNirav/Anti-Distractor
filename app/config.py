@@ -48,8 +48,22 @@ DEMO_TIMINGS = TimingConfig(
 SERVER_HOST: str = "127.0.0.1"
 SERVER_PORT: int = 8765
 DB_PATH: str = "anti_distractor.db"
-GEMINI_TEXT_MODEL: str = "gemini-3.5-flash-lite"
-GEMINI_VISION_MODEL: str = "gemini-3.5-flash"
+# Model preference hierarchy:
+# Preference 1: Gemini 3.5 Flash-Lite (fast, economical, multimodal)
+# Preference 2: Gemma 31B (gemma-4-31b-it)
+# Preference 3: Gemma 24B (gemma-4-26b-a4b-it MoE)
+MODEL_PREFERENCE_1: str = os.getenv("MODEL_PREFERENCE_1", "gemini-3.5-flash-lite")
+MODEL_PREFERENCE_2: str = os.getenv("MODEL_PREFERENCE_2", "gemma-4-31b-it")
+MODEL_PREFERENCE_3: str = os.getenv("MODEL_PREFERENCE_3", "gemma-4-26b-a4b-it")
+
+MODEL_PREFERENCES: list[str] = [
+    MODEL_PREFERENCE_1,
+    MODEL_PREFERENCE_2,
+    MODEL_PREFERENCE_3,
+]
+
+GEMINI_TEXT_MODEL: str = MODEL_PREFERENCE_1
+GEMINI_VISION_MODEL: str = MODEL_PREFERENCE_1
 SCREENSHOT_MAX_WIDTH: int = 1024
 PUNISH_CONFIDENCE_THRESHOLD: float = 0.60
 TIER1_ESCALATION_CONFIDENCE: float = 0.75

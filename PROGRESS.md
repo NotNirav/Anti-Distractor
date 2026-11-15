@@ -87,7 +87,18 @@
   - Implemented `tests/test_demo_runbook.py` verifying both `dev` and `demo` timing configurations, simulating all 6 steps of the 2-minute live demo script (Setup -> on-task silent pass -> off-task grace period -> Layer 1 popup -> Layer 2 strict tab closure & overlay -> lockout expiration & post-session review), and testing extension disconnect resilience.
   - Authored comprehensive [README.md](file:///d:/Computer%20Programming/Hackathons/Upcomming/Agentix%202.0/Anti-Distractor/README.md) with system architecture diagram, quick start, 3-step browser extension loading instructions, 2-minute demo runbook, timing parameters, test suite overview, and troubleshooting FAQs (including emergency escape hatches).
   - Verified full test suite (`python -m pytest tests -q`): **35 passed**, 0 failures.
-- **What's left**: None. All phases (Phase 0 through Phase 6) and all 14 tasks in `implementation_plan.md` are 100% complete and verified.
+- **Model Preference Hierarchy & 20-Image Benchmark completed**:
+  - Configured 3-tier model preference system in `app/config.py`:
+    - Preference 1: `gemini-3.5-flash-lite` (primary for both Tier 1 text and Tier 2 vision)
+    - Preference 2: `gemma-4-31b-it` (automatic failover on 429/quota/tokens exhausted)
+    - Preference 3: `gemma-4-26b-a4b-it` (tertiary fallback)
+    - Last resort: Shift to Tier 0 local rules only (no AI) with user notification popup.
+  - Implemented `ModelPreferenceManager` in `app/judge.py` with thread-safe preference tracking, automatic failover, and `on_shift_to_tier0` popup callback.
+  - Added `show_tier0_shift_popup` to `UIHooks` and `TkinterUI` in `app/ui.py` to notify users whenever all AI models are offline.
+  - Implemented unit tests in `tests/test_model_preferences.py` covering failover sequence, Tier 0 mode evaluation, and automatic recovery probing (3 new tests, 38 total passed).
+  - Created 20 realistic desktop benchmark screenshots (`scripts/run_image_benchmark.py`) covering 10 DSA on-task scenarios and 10 non-DSA distraction scenarios.
+  - Benchmarked all 20 images against the preference models: **100.0% accuracy** (20/20 correct predictions, 0 false positives, 0 false negatives, average confidence 1.00).
+- **What's left**: None. All phases, tasks, model preference hierarchy, and benchmark evaluations are 100% complete.
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).

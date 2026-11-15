@@ -13,7 +13,7 @@ from typing import Any, Callable
 from app.cache import VerdictCache
 from app.config import TimingConfig, get_gemini_api_key, get_timings
 from app.event_engine import EventEngine
-from app.judge import generate_session_review
+from app.judge import generate_session_review, get_model_manager
 from app.logger import SessionLogger
 from app.models import ActivityContext, GoalProfile, JudgeVerdict, ModeType
 from app.profile import fallback_goal_profile, generate_goal_profile
@@ -188,6 +188,10 @@ class AppController:
         session_logger = self._session_logger_cls(db_path=self.db_path)
         session_logger.init_db()
         session_id = session_logger.start_session(goal, mode, duration_minutes, profile)
+
+        model_manager = get_model_manager()
+        if hasattr(self.ui, "show_tier0_shift_popup"):
+            model_manager.on_shift_to_tier0 = self.ui.show_tier0_shift_popup
 
         tab_store = TabSnapshotStore()
         command_queue = CommandQueue()

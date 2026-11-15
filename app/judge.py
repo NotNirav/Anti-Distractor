@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 import logging
-from typing import Any
+import threading
+from typing import Any, Callable
 
 from google import genai
 from google.genai import types
@@ -16,6 +17,10 @@ from app.cache import VerdictCache
 from app.config import (
     GEMINI_TEXT_MODEL,
     GEMINI_VISION_MODEL,
+    MODEL_PREFERENCES,
+    MODEL_PREFERENCE_1,
+    MODEL_PREFERENCE_2,
+    MODEL_PREFERENCE_3,
     PUNISH_CONFIDENCE_THRESHOLD,
     SCREENSHOT_MAX_WIDTH,
     TIER1_ESCALATION_CONFIDENCE,
@@ -30,6 +35,125 @@ class GeminiRateLimitError(Exception):
     """Raised when the Gemini API returns a quota or rate-limit error (HTTP 429)."""
 
 
+class ModelPreferenceManager:
+    """Manages 3-tier model preferences with automatic failover and Tier 0 shift notification.
+
+    Preference 1: Gemini 3.5 Flash-Lite
+    Preference 2: Gemma 31B (gemma-4-31b-it)
+    Preference 3: Gemma 24B (gemma-4-26b-a4b-it)
+    Last resort: Shift to Tier 0 rules only (no AI) with user-facing notification.
+    """
+
+    def __init__(
+        self,
+        preferences: list[str] | None = None,
+        on_shift_to_tier0: Callable[[str], None] | None = None,
+        on_preference_changed: Callable[[str, int], None] | None = None,
+    ) -> None:
+        self.preferences = list(preferences or MODEL_PREFERENCES)
+        self.active_index = 0
+        self.tier0_mode_active = False
+        self.on_shift_to_tier0 = on_shift_to_tier0
+        self.on_preference_changed = on_preference_changed
+        self._lock = threading.Lock()
+        self._tier0_notified = False
+
+    @property
+    def current_model(self) -> str | None:
+        with self._lock:
+            if self.tier0_mode_active or self.active_index >= len(self.preferences):
+                return None
+            return self.preferences[self.active_index]
+
+    def reset_preferences(self) -> None:
+        """Reset back to Preference 1 when AI is available again."""
+        with self._lock:
+            self.active_index = 0
+            self.tier0_mode_active = False
+            self._tier0_notified = False
+            if self.on_preference_changed and self.preferences:
+                try:
+                    self.on_preference_changed(self.preferences[0], 0)
+                except Exception:
+                    logger.exception("Error in on_preference_changed callback")
+
+    def escalate_failure(self, failed_model: str, exc: Exception) -> str | None:
+        """Fail over to next preference, or shift to Tier 0 if all preferences exhausted."""
+        with self._lock:
+            logger.warning(
+                "Model %s failed with %s. Attempting failover to next preference...",
+                failed_model,
+                exc,
+            )
+            if self.active_index < len(self.preferences) and self.preferences[self.active_index] == failed_model:
+                self.active_index += 1
+
+            if self.active_index < len(self.preferences):
+                next_model = self.preferences[self.active_index]
+                logger.info(
+                    "Shifted model to Preference %d/%d: %s",
+                    self.active_index + 1,
+                    len(self.preferences),
+                    next_model,
+                )
+                if self.on_preference_changed:
+                    try:
+                        self.on_preference_changed(next_model, self.active_index)
+                    except Exception:
+                        logger.exception("Error in on_preference_changed callback")
+                return next_model
+
+            # All preferences failed -> Shift to Tier 0 local rules only
+            self.tier0_mode_active = True
+            logger.warning(
+                "All %d AI model preferences exhausted! Shifting to Tier 0 local rules only.",
+                len(self.preferences),
+            )
+            if not self._tier0_notified:
+                self._tier0_notified = True
+                if self.on_shift_to_tier0:
+                    try:
+                        self.on_shift_to_tier0(
+                            "All AI models (Gemini 3.5 Flash-Lite, Gemma 31B, Gemma 24B) are currently "
+                            "unavailable due to rate limits or capacity. Shifting to Tier 0 rules only "
+                            "until an AI becomes available."
+                        )
+                    except Exception:
+                        logger.exception("Error in on_shift_to_tier0 callback")
+            return None
+
+    def probe_recovery(self, api_key: str) -> bool:
+        """Probe Preference 1 to see if it has recovered from rate limits."""
+        with self._lock:
+            if not self.tier0_mode_active and self.active_index == 0:
+                return True
+        try:
+            client = genai.Client(api_key=api_key)
+            resp = client.models.generate_content(
+                model=self.preferences[0],
+                contents="ping",
+            )
+            if resp and getattr(resp, "text", None):
+                logger.info("AI model %s is responsive again. Restoring AI evaluation.", self.preferences[0])
+                self.reset_preferences()
+                return True
+        except Exception:
+            pass
+        return False
+
+
+_global_model_manager = ModelPreferenceManager()
+
+
+def get_model_manager() -> ModelPreferenceManager:
+    return _global_model_manager
+
+
+def set_model_manager(mgr: ModelPreferenceManager) -> None:
+    global _global_model_manager
+    _global_model_manager = mgr
+
+
 class _JudgeVerdictResponse(BaseModel):
     activity: str
     on_task: bool
@@ -39,16 +163,48 @@ class _JudgeVerdictResponse(BaseModel):
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Check if an exception represents an HTTP 429 or Gemini quota exhaustion."""
+    """Check if an exception represents rate limits, quota exhaustion, 429, 503, or token depletion."""
     code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    return code == 429 or "RESOURCE_EXHAUSTED" in str(exc)
+    if code in (429, 500, 503):
+        return True
+    s = str(exc).lower()
+    return any(
+        k in s
+        for k in (
+            "resource_exhausted",
+            "quota",
+            "rate limit",
+            "tokens are over",
+            "token limit",
+            "high demand",
+            "unavailable",
+            "internal error",
+        )
+    )
+
+
+def _extract_json_string(text: str) -> str:
+    """Extract valid JSON from raw text, code fences (```json ... ```), or thinking parts."""
+    if not text:
+        return ""
+    cleaned = text.strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in cleaned:
+        cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
 
 
 def _parse_verdict_response(raw_text: str | None, ctx: ActivityContext, tier_used: int) -> JudgeVerdict:
-    """Parse and validate the JSON verdict string from Gemini, filtering out invented tab IDs."""
+    """Parse and validate the JSON verdict string from Gemini or Gemma, filtering out invented tab IDs."""
     if not raw_text or not raw_text.strip():
         raise ValueError(f"Empty response from Tier {tier_used} judge.")
-    parsed = _JudgeVerdictResponse.model_validate_json(raw_text)
+    json_str = _extract_json_string(raw_text)
+    parsed = _JudgeVerdictResponse.model_validate_json(json_str)
     valid_ids = {t.tab_id for t in ctx.tab_snapshot.tabs} if ctx.tab_snapshot and ctx.tab_snapshot.tabs else set()
     return JudgeVerdict(
         activity=parsed.activity,
@@ -213,8 +369,10 @@ def tier1_evaluate(
     ctx: ActivityContext,
     profile: GoalProfile,
     api_key: str,
+    model: str | None = None,
+    model_manager: ModelPreferenceManager | None = None,
 ) -> JudgeVerdict:
-    """Call Gemini text model with metadata and open tabs/windows; returns strict JSON verdict."""
+    """Call text model with metadata and open tabs/windows, respecting model preference hierarchy."""
     if not api_key or not api_key.strip():
         raise ValueError("GEMINI_API_KEY is missing or empty.")
 
@@ -231,21 +389,54 @@ Instructions:
 4. "reason": A single clear sentence justifying the verdict.
 5. "tabs_to_close": List of tab IDs corresponding to distracting/off-task browser tabs that should be closed if strict mode is active.
 """
-    try:
+
+    mgr = model_manager if model_manager is not None else get_model_manager()
+
+    def _eval_with_model(model_name: str) -> JudgeVerdict:
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=GEMINI_TEXT_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_JudgeVerdictResponse,
-            ),
-        )
-        return _parse_verdict_response(response.text, ctx, tier_used=1)
-    except Exception as e:
-        if _is_rate_limit_error(e):
-            raise GeminiRateLimitError(str(e)) from e
-        raise
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=_JudgeVerdictResponse,
+                ),
+            )
+        except Exception as e:
+            if "schema" in str(e).lower() or "invalid_argument" in str(e).lower() or "not supported" in str(e).lower():
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt + "\n\nCRITICAL: Respond ONLY with a valid JSON object matching the schema. No markdown formatting.",
+                )
+            else:
+                raise
+        raw_text = getattr(response, "text", None) or ""
+        if not raw_text and hasattr(response, "candidates") and response.candidates:
+            parts = response.candidates[0].content.parts
+            text_parts = [p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False)]
+            raw_text = "".join(text_parts) if text_parts else "".join(p.text for p in parts if getattr(p, "text", None))
+        return _parse_verdict_response(raw_text, ctx, tier_used=1)
+
+    if model is not None:
+        return _eval_with_model(model)
+
+    if mgr.tier0_mode_active:
+        raise GeminiRateLimitError("Tier 0 mode active (all AI models offline)")
+
+    while True:
+        target_model = mgr.current_model
+        if target_model is None:
+            raise GeminiRateLimitError("All AI models offline; shifted to Tier 0 rules.")
+        try:
+            return _eval_with_model(target_model)
+        except Exception as exc:
+            if _is_rate_limit_error(exc):
+                next_m = mgr.escalate_failure(target_model, exc)
+                if next_m is None:
+                    raise GeminiRateLimitError("All AI model preferences exhausted; shifting to Tier 0.") from exc
+                continue
+            raise
 
 
 def tier2_evaluate(
@@ -253,8 +444,10 @@ def tier2_evaluate(
     profile: GoalProfile,
     screenshot_jpeg: bytes,
     api_key: str,
+    model: str | None = None,
+    model_manager: ModelPreferenceManager | None = None,
 ) -> JudgeVerdict:
-    """Call Gemini vision model with in-memory screenshot and context; returns strict JSON verdict."""
+    """Call vision model with in-memory screenshot and context, respecting model preference hierarchy."""
     if not api_key or not api_key.strip():
         raise ValueError("GEMINI_API_KEY is missing or empty.")
 
@@ -271,22 +464,55 @@ Visual Evaluation Instructions:
 5. "reason": 1-2 sentence explanation referencing what is visually seen on screen.
 6. "tabs_to_close": List of integer tab IDs to close if strict mode is triggered.
 """
-    try:
+
+    mgr = model_manager if model_manager is not None else get_model_manager()
+
+    def _eval_with_model(model_name: str) -> JudgeVerdict:
         client = genai.Client(api_key=api_key)
         image_part = types.Part.from_bytes(data=screenshot_jpeg, mime_type="image/jpeg")
-        response = client.models.generate_content(
-            model=GEMINI_VISION_MODEL,
-            contents=[image_part, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_JudgeVerdictResponse,
-            ),
-        )
-        return _parse_verdict_response(response.text, ctx, tier_used=2)
-    except Exception as e:
-        if _is_rate_limit_error(e):
-            raise GeminiRateLimitError(str(e)) from e
-        raise
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[image_part, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=_JudgeVerdictResponse,
+                ),
+            )
+        except Exception as e:
+            if "schema" in str(e).lower() or "invalid_argument" in str(e).lower() or "not supported" in str(e).lower():
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[image_part, prompt + "\n\nCRITICAL: Respond ONLY with a valid JSON object matching the schema. No markdown formatting."],
+                )
+            else:
+                raise
+        raw_text = getattr(response, "text", None) or ""
+        if not raw_text and hasattr(response, "candidates") and response.candidates:
+            parts = response.candidates[0].content.parts
+            text_parts = [p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False)]
+            raw_text = "".join(text_parts) if text_parts else "".join(p.text for p in parts if getattr(p, "text", None))
+        return _parse_verdict_response(raw_text, ctx, tier_used=2)
+
+    if model is not None:
+        return _eval_with_model(model)
+
+    if mgr.tier0_mode_active:
+        raise GeminiRateLimitError("Tier 0 mode active (all AI models offline)")
+
+    while True:
+        target_model = mgr.current_model
+        if target_model is None:
+            raise GeminiRateLimitError("All AI models offline; shifted to Tier 0 rules.")
+        try:
+            return _eval_with_model(target_model)
+        except Exception as exc:
+            if _is_rate_limit_error(exc):
+                next_m = mgr.escalate_failure(target_model, exc)
+                if next_m is None:
+                    raise GeminiRateLimitError("All AI model preferences exhausted; shifting to Tier 0.") from exc
+                continue
+            raise
 
 
 def _apply_confidence_gate(verdict: JudgeVerdict) -> JudgeVerdict:
@@ -345,19 +571,32 @@ def evaluate_context(
     cache: VerdictCache,
     api_key: str,
     force_vision: bool = False,
+    model_manager: ModelPreferenceManager | None = None,
 ) -> JudgeVerdict:
-    """Run Tier 0 -> Tier 1 -> Tier 2 escalation with confidence gating and rate-limit fallback."""
+    """Run Tier 0 -> Tier 1 -> Tier 2 escalation with model preference failover, confidence gating, and Tier 0 shift."""
+    mgr = model_manager if model_manager is not None else get_model_manager()
+
+    # If all AI models are offline, shift exclusively to Tier 0 local rules
+    if mgr.tier0_mode_active:
+        return _safe_fallback(
+            ctx,
+            profile,
+            cache,
+            "Tier 0 rules only mode active (all AI models offline)",
+            rate_limited=True,
+        )
+
     if not force_vision:
         tier0_verdict = tier0_evaluate(ctx, profile, cache)
         if tier0_verdict is not None:
             return _apply_confidence_gate(tier0_verdict)
 
         try:
-            tier1_verdict = tier1_evaluate(ctx, profile, api_key)
+            tier1_verdict = tier1_evaluate(ctx, profile, api_key, model_manager=mgr)
         except GeminiRateLimitError:
-            logger.warning("Rate limit hit during Tier 1 evaluation; using Tier 0 / on-task fallback.")
+            logger.warning("All AI models hit rate limits/unavailable during Tier 1; using Tier 0 fallback.")
             return _safe_fallback(
-                ctx, profile, cache, "Gemini API rate limit hit at Tier 1", rate_limited=True
+                ctx, profile, cache, "AI models unavailable at Tier 1; using Tier 0 rules", rate_limited=True
             )
         except Exception as exc:
             logger.warning("Tier 1 evaluation failed (%s); falling back to safe verdict.", exc)
@@ -380,11 +619,11 @@ def evaluate_context(
                 return gated
 
             try:
-                tier2_verdict = tier2_evaluate(ctx, profile, screenshot_bytes, api_key)
+                tier2_verdict = tier2_evaluate(ctx, profile, screenshot_bytes, api_key, model_manager=mgr)
             except GeminiRateLimitError:
-                logger.warning("Rate limit hit during Tier 2 escalation; using Tier 0 / on-task fallback.")
+                logger.warning("All AI models hit rate limits/unavailable during Tier 2; using Tier 0 fallback.")
                 return _safe_fallback(
-                    ctx, profile, cache, "Gemini API rate limit hit at Tier 2", rate_limited=True
+                    ctx, profile, cache, "AI models unavailable at Tier 2; using Tier 0 rules", rate_limited=True
                 )
             except Exception as exc:
                 logger.warning(
@@ -414,17 +653,17 @@ def evaluate_context(
             exc,
         )
         try:
-            tier1_verdict = tier1_evaluate(ctx, profile, api_key)
+            tier1_verdict = tier1_evaluate(ctx, profile, api_key, model_manager=mgr)
             final_verdict = _apply_confidence_gate(tier1_verdict)
             _cache_if_confident(ctx, final_verdict, cache)
             return final_verdict
         except GeminiRateLimitError:
-            logger.warning("Rate limit hit during Tier 1 fallback after screenshot failure.")
+            logger.warning("AI models hit rate limits during Tier 1 fallback after screenshot failure.")
             return _safe_fallback(
                 ctx,
                 profile,
                 cache,
-                "Screenshot failed and Tier 1 hit rate limit",
+                "Screenshot failed and AI models hit rate limits",
                 rate_limited=True,
             )
         except Exception as tier1_exc:
@@ -441,11 +680,11 @@ def evaluate_context(
             )
 
     try:
-        tier2_verdict = tier2_evaluate(ctx, profile, screenshot_bytes, api_key)
+        tier2_verdict = tier2_evaluate(ctx, profile, screenshot_bytes, api_key, model_manager=mgr)
     except GeminiRateLimitError:
-        logger.warning("Rate limit hit during forced Tier 2 vision check; using Tier 0 / on-task fallback.")
+        logger.warning("AI models unavailable during forced Tier 2 vision check; using Tier 0 fallback.")
         return _safe_fallback(
-            ctx, profile, cache, "Gemini API rate limit hit at Tier 2", rate_limited=True
+            ctx, profile, cache, "AI models unavailable at Tier 2; using Tier 0 rules", rate_limited=True
         )
     except Exception as exc:
         logger.warning(
@@ -453,7 +692,7 @@ def evaluate_context(
             exc,
         )
         try:
-            tier1_verdict = tier1_evaluate(ctx, profile, api_key)
+            tier1_verdict = tier1_evaluate(ctx, profile, api_key, model_manager=mgr)
             final_verdict = _apply_confidence_gate(tier1_verdict)
             _cache_if_confident(ctx, final_verdict, cache)
             return final_verdict
