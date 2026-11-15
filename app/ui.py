@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Callable, Literal, Protocol
@@ -69,6 +71,7 @@ class TkinterUI:
 
         self._active_popups: list[tk.Toplevel] = []
         self._strict_overlay_win: tk.Toplevel | None = None
+        self._strict_countdown_after_id: str | None = None
 
         # Start the queue pump
         self._pump()
@@ -358,19 +361,175 @@ class TkinterUI:
 
         self.dispatch(_action)
 
-    # Placeholders for Task 5.3 (Layer 1, Layer 2, strict overlay)
+    def _hide_popups_and_overlay_now(self) -> None:
+        """Synchronously close active popups and strict overlay on the Tk main thread."""
+        if self._strict_countdown_after_id is not None and self._strict_overlay_win is not None:
+            try:
+                self._strict_overlay_win.after_cancel(self._strict_countdown_after_id)
+            except Exception:
+                pass
+            self._strict_countdown_after_id = None
+
+        for popup in list(self._active_popups):
+            try:
+                if popup.winfo_exists():
+                    popup.destroy()
+            except Exception:
+                pass
+        self._active_popups.clear()
+
+        if self._strict_overlay_win is not None:
+            try:
+                if self._strict_overlay_win.winfo_exists():
+                    self._strict_overlay_win.destroy()
+            except Exception:
+                pass
+            self._strict_overlay_win = None
+
     def show_layer1_popup(
         self,
         goal: str,
         reason: str,
         on_choice: Callable[[Literal["back_to_work", "relevant"]], None],
     ) -> None:
-        """Display Layer 1 'Are you studying <goal>?' popup (T5.3)."""
-        logger.info("show_layer1_popup requested: goal=%r reason=%r", goal, reason)
+        """Display Layer 1 'Are you studying <goal>?' popup (thread-safe)."""
+
+        def _action() -> None:
+            self._hide_popups_and_overlay_now()
+
+            win = tk.Toplevel(self.root)
+            win.title("Anti-Distractor — Quick Check")
+            win.attributes("-topmost", True)
+            win.resizable(False, False)
+
+            width, height = 420, 210
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            x = max(0, screen_w - width - 24)
+            y = max(0, screen_h - height - 64)
+            win.geometry(f"{width}x{height}+{x}+{y}")
+
+            frame = ttk.Frame(win, padding="16 14 16 14")
+            frame.pack(fill="both", expand=True)
+
+            title_lbl = ttk.Label(
+                frame,
+                text="Quick Focus Check",
+                font=("Segoe UI", 12, "bold"),
+                foreground="#E65100",
+            )
+            title_lbl.pack(anchor="w", pady=(0, 6))
+
+            goal_lbl = ttk.Label(
+                frame,
+                text=f"Goal: {goal}",
+                font=("Segoe UI", 10, "bold"),
+                wraplength=380,
+                justify="left",
+            )
+            goal_lbl.pack(anchor="w", pady=(0, 4))
+
+            reason_lbl = ttk.Label(
+                frame,
+                text=reason or "Current activity looks off-task.",
+                font=("Segoe UI", 9),
+                wraplength=380,
+                justify="left",
+            )
+            reason_lbl.pack(anchor="w", pady=(0, 14))
+
+            btn_row = ttk.Frame(frame)
+            btn_row.pack(fill="x", side="bottom")
+
+            def _choose(choice: Literal["back_to_work", "relevant"]) -> None:
+                self._hide_popups_and_overlay_now()
+                try:
+                    on_choice(choice)
+                except Exception:
+                    logger.exception("Error in Layer 1 on_choice callback")
+
+            back_btn = ttk.Button(
+                btn_row,
+                text="Back to work",
+                command=lambda: _choose("back_to_work"),
+            )
+            back_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+
+            rel_btn = ttk.Button(
+                btn_row,
+                text="This is relevant",
+                command=lambda: _choose("relevant"),
+            )
+            rel_btn.pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+            win.protocol("WM_DELETE_WINDOW", self._hide_popups_and_overlay_now)
+            self._active_popups.append(win)
+
+        self.dispatch(_action)
 
     def show_layer2_warning(self, goal: str, reason: str) -> None:
-        """Display Layer 2 Normal-mode loud warning popup (T5.3)."""
-        logger.info("show_layer2_warning requested: goal=%r reason=%r", goal, reason)
+        """Display Layer 2 Normal-mode loud warning popup (thread-safe)."""
+
+        def _action() -> None:
+            self._hide_popups_and_overlay_now()
+
+            try:
+                self.root.bell()
+            except Exception:
+                pass
+
+            win = tk.Toplevel(self.root)
+            win.title("Anti-Distractor — OFF-TASK WARNING")
+            win.attributes("-topmost", True)
+            win.resizable(False, False)
+
+            width, height = 460, 230
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            x = max(0, (screen_w - width) // 2)
+            y = max(0, (screen_h - height) // 3)
+            win.geometry(f"{width}x{height}+{x}+{y}")
+
+            banner = tk.Frame(win, bg="#C62828", padx=16, pady=12)
+            banner.pack(fill="x")
+            tk.Label(
+                banner,
+                text="⚠ OFF-TASK WARNING",
+                font=("Segoe UI", 14, "bold"),
+                bg="#C62828",
+                fg="#FFFFFF",
+            ).pack(anchor="w")
+
+            body = ttk.Frame(win, padding="16 14 16 14")
+            body.pack(fill="both", expand=True)
+
+            ttk.Label(
+                body,
+                text=f"Return to your goal: {goal}",
+                font=("Segoe UI", 10, "bold"),
+                wraplength=420,
+                justify="left",
+            ).pack(anchor="w", pady=(0, 6))
+
+            ttk.Label(
+                body,
+                text=reason or "Distraction detected.",
+                font=("Segoe UI", 9),
+                wraplength=420,
+                justify="left",
+            ).pack(anchor="w", pady=(0, 14))
+
+            dismiss_btn = ttk.Button(
+                body,
+                text="Dismiss — Back to Work",
+                command=self._hide_popups_and_overlay_now,
+            )
+            dismiss_btn.pack(side="right")
+
+            win.protocol("WM_DELETE_WINDOW", self._hide_popups_and_overlay_now)
+            self._active_popups.append(win)
+
+        self.dispatch(_action)
 
     def show_strict_overlay(
         self,
@@ -379,29 +538,109 @@ class TkinterUI:
         lockout_seconds: float,
         on_lockout_done: Callable[[], None],
     ) -> None:
-        """Display Strict-mode full-screen topmost blank overlay (T5.3)."""
-        logger.info(
-            "show_strict_overlay requested: goal=%r reason=%r lockout=%.1fs",
-            goal,
-            reason,
-            lockout_seconds,
-        )
+        """Display Strict-mode full-screen topmost overlay with countdown and demo escape hatch."""
+
+        def _action() -> None:
+            self._hide_popups_and_overlay_now()
+
+            win = tk.Toplevel(self.root)
+            win.title("Anti-Distractor — Strict Lockout")
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.configure(bg="#121212")
+
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            win.geometry(f"{screen_w}x{screen_h}+0+0")
+            self._strict_overlay_win = win
+
+            container = tk.Frame(win, bg="#121212")
+            container.place(relx=0.5, rely=0.5, anchor="center")
+
+            tk.Label(
+                container,
+                text=f"Start {goal} again",
+                font=("Segoe UI", 28, "bold"),
+                bg="#121212",
+                fg="#FFFFFF",
+                wraplength=max(400, screen_w - 120),
+                justify="center",
+            ).pack(pady=(0, 14))
+
+            tk.Label(
+                container,
+                text=reason or "Strict mode lockout active.",
+                font=("Segoe UI", 13),
+                bg="#121212",
+                fg="#EF9A9A",
+                wraplength=max(400, screen_w - 160),
+                justify="center",
+            ).pack(pady=(0, 24))
+
+            countdown_lbl = tk.Label(
+                container,
+                text="",
+                font=("Segoe UI", 18, "bold"),
+                bg="#121212",
+                fg="#FFB74D",
+            )
+            countdown_lbl.pack(pady=(0, 28))
+
+            completed = False
+
+            def _finish_lockout() -> None:
+                nonlocal completed
+                if completed:
+                    return
+                completed = True
+                self._hide_popups_and_overlay_now()
+                try:
+                    on_lockout_done()
+                except Exception:
+                    logger.exception("Error in strict overlay on_lockout_done callback")
+
+            escape_btn = tk.Button(
+                container,
+                text="Emergency Exit (Demo: Ctrl+Shift+Esc)",
+                font=("Segoe UI", 10),
+                bg="#2C2C2C",
+                fg="#CCCCCC",
+                activebackground="#424242",
+                activeforeground="#FFFFFF",
+                relief="flat",
+                padx=12,
+                pady=6,
+                command=_finish_lockout,
+            )
+            escape_btn.pack()
+
+            win.bind("<Control-Shift-Escape>", lambda _event: _finish_lockout())
+            win.protocol("WM_DELETE_WINDOW", lambda: None)
+            try:
+                win.focus_force()
+            except Exception:
+                pass
+
+            deadline = time.monotonic() + max(0.0, float(lockout_seconds))
+
+            def _tick() -> None:
+                if completed or not win.winfo_exists():
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    _finish_lockout()
+                    return
+                secs = math.ceil(remaining)
+                countdown_lbl.config(text=f"Lockout ends in {secs}s")
+                self._strict_countdown_after_id = win.after(200, _tick)
+
+            _tick()
+
+        self.dispatch(_action)
 
     def hide_popups_and_overlay(self) -> None:
-        """Dismiss active Layer 1/2 popups or strict-mode overlay (T5.3)."""
-        for popup in list(self._active_popups):
-            try:
-                popup.destroy()
-            except Exception:
-                pass
-        self._active_popups.clear()
-
-        if self._strict_overlay_win is not None:
-            try:
-                self._strict_overlay_win.destroy()
-            except Exception:
-                pass
-            self._strict_overlay_win = None
+        """Dismiss active Layer 1/2 popups or strict-mode overlay (thread-safe)."""
+        self.dispatch(self._hide_popups_and_overlay_now)
 
 
 if __name__ == "__main__":
