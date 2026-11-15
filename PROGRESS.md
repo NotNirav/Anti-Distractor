@@ -15,7 +15,7 @@
 - [x] **T5.1** (Flash) — SQLite Session & Activity Logger (`done`)
 - [x] **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`done`)
 - [x] **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`done`)
-- [ ] **T6.1** (Flash) — Dev/Demo Timing Verification, Error Hardening, and Demo Runbook (`todo`)
+- [x] **T6.1** (Flash) — Dev/Demo Timing Verification, Error Hardening, and Demo Runbook (`done`)
 
 ## Notes
 - **T0.1 completed**:
@@ -83,7 +83,11 @@
   - Implemented `AppController` in `app/main.py` orchestrating `Config`, `SessionLogger`, `TabSnapshotStore`, `CommandQueue`, `WindowWatcher`, `EventEngine`, `AgentStateMachine`, and `TkinterUI` across background threads and main Tkinter GUI loop.
   - Added zero-quota fake judge support (`ANTI_DISTRACTOR_FAKE_JUDGE=1`) for local offline validation and rehearsed demos.
   - Verified via `tests/test_main_wiring.py` covering session start, tab/window event triggers, state machine decisions, override propagation, and session completion review (`ALL 32 TESTS PASSED`).
-- **Next up**: **T6.1** (Flash) — Dev/Demo Timing Verification, Error Hardening, and Demo Runbook (`README.md`).
+- **T6.1 completed**:
+  - Implemented `tests/test_demo_runbook.py` verifying both `dev` and `demo` timing configurations, simulating all 6 steps of the 2-minute live demo script (Setup -> on-task silent pass -> off-task grace period -> Layer 1 popup -> Layer 2 strict tab closure & overlay -> lockout expiration & post-session review), and testing extension disconnect resilience.
+  - Authored comprehensive [README.md](file:///d:/Computer%20Programming/Hackathons/Upcomming/Agentix%202.0/Anti-Distractor/README.md) with system architecture diagram, quick start, 3-step browser extension loading instructions, 2-minute demo runbook, timing parameters, test suite overview, and troubleshooting FAQs (including emergency escape hatches).
+  - Verified full test suite (`python -m pytest tests -q`): **35 passed**, 0 failures.
+- **What's left**: None. All phases (Phase 0 through Phase 6) and all 14 tasks in `implementation_plan.md` are 100% complete and verified.
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
@@ -115,4 +119,4 @@
 - **Summary:** Implemented `_enforce_strict_mode`, snapshot-validated tab closing (`_resolve_tabs_to_close`), non-browser foreground window minimization (`_resolve_minimize_hwnd` + `minimize_window`), strict lockout expiry in `handle_tick`, `complete_lockout()` for overlay timer/demo escape hatch completion, and resilient side-effect dispatch (`_dispatch_side_effects`).
 - **Deviations:** Added optional `minimize_fn` and `on_lockout_done` constructor parameters plus `complete_lockout()` on `AgentStateMachine` (backwards-compatible with `CONTRACTS.md`) so `UIHooks.show_strict_overlay` completion/escape hatch and `EventEngine.run_immediate_check` can cleanly terminate strict lockout and test safely without Win32 side effects.
 - **Test result:** Passed custom T4.1 Normal + Strict mode acceptance test (`ALL T4.1 ACCEPTANCE TESTS PASSED`, exit code 0) covering snapshot tab-ID filtering, active-tab fallback, non-browser minimize, tick/on-task/escape-hatch lockout ending, and missing/raising queue/window/snapshot resilience.
-- **What's left:** Phase 6 (`T6.1`).
+- **What's left:** None — Phase 6 (T6.1) is complete. The full project is wrapped up and production-ready.
