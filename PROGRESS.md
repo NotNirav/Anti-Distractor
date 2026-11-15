@@ -13,7 +13,7 @@
 - [x] **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`done`)
 - [x] **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`done`)
 - [x] **T5.1** (Flash) — SQLite Session & Activity Logger (`done`)
-- [ ] **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`todo`)
+- [x] **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`done`)
 - [ ] **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`todo`)
 - [ ] **T6.1** (Flash) — Dev/Demo Timing Verification, Error Hardening, and Demo Runbook (`todo`)
 
@@ -72,7 +72,13 @@
   - Created `sessions` and `activity_logs` tables following `CONTRACTS.md` §7.
   - Verified session start, text-only event logging, override marking, session finishing with review text, and ordered log fetching.
   - Acceptance tests passed cleanly in `tests/test_logger.py` (`test_session_logger_lifecycle`).
-- **Next up**: **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`app/ui.py`).
+- **T5.2 completed**:
+  - Implemented `TkinterUI` in `app/ui.py` with thread-safe `_queue` dispatch and `root.after()` event pump.
+  - Built the session Setup window (goal input, duration validation, Normal vs Strict radio buttons, and "I'm ready" action).
+  - Built the compact topmost monitoring HUD (goal title, mode badge, color-coded state badge, latest activity summary, and "End Session" action).
+  - Built the scrollable AI Session Review window with markdown formatting support and clean close action.
+  - Verified via `tests/test_ui.py` and standalone test harness (`ALL 31 TESTS PASSED`).
+- **Next up**: **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`app/ui.py`, `app/main.py`).
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
