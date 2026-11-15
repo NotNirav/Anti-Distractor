@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.cache import VerdictCache
 from app.config import GEMINI_TEXT_MODEL, GEMINI_VISION_MODEL
 from app.models import ActivityContext, GoalProfile, JudgeVerdict, ModeType
+from app.profile import normalize_domain
 
 
 class GeminiRateLimitError(Exception):
@@ -85,14 +86,109 @@ Browser Tabs:
 """
 
 
+def _domain_matches(domain: str, candidate_list: list[str]) -> bool:
+    """Check if domain matches or is a subdomain of any domain in candidate_list."""
+    norm = normalize_domain(domain) or domain.strip().lower()
+    if not norm:
+        return False
+    for c in candidate_list:
+        cnorm = normalize_domain(c) or c.strip().lower()
+        if not cnorm:
+            continue
+        if norm == cnorm or norm.endswith("." + cnorm):
+            return True
+    return False
+
+
 def tier0_evaluate(
     ctx: ActivityContext,
     profile: GoalProfile,
     cache: VerdictCache,
 ) -> JudgeVerdict | None:
     """Evaluate using verdict cache and goal-profile allow/block lists; return None if ambiguous."""
-    # TODO(T3.2): Implement Tier 0 cache + GoalProfile allow/block matching.
-    raise NotImplementedError("TODO(T3.2): Implement tier0_evaluate")
+    # 1. First, check in-memory VerdictCache (handles repeat visits and user overrides)
+    cached = cache.get(ctx.source_key, ctx.display_title)
+    if cached is not None:
+        return cached
+
+    # 2. Check website domain rules
+    source = (ctx.source_key or "").strip().lower()
+    domain_candidate = ""
+    if ctx.tab_snapshot and ctx.tab_snapshot.tabs:
+        active_tab = next(
+            (t for t in ctx.tab_snapshot.tabs if t.active),
+            ctx.tab_snapshot.tabs[0],
+        )
+        domain_candidate = active_tab.domain or normalize_domain(active_tab.url)
+    if not domain_candidate and not source.endswith(".exe"):
+        domain_candidate = normalize_domain(source) or source
+
+    if domain_candidate:
+        # Borderline domains (e.g. youtube.com, reddit.com) require content inspection -> Tier 1/2
+        if _domain_matches(domain_candidate, profile.borderline_domains):
+            return None
+
+        # Blocked domains -> instantaneous off-task verdict
+        if _domain_matches(domain_candidate, profile.blocked_domains):
+            tabs_to_close: list[int] = []
+            if ctx.tab_snapshot and ctx.tab_snapshot.active_tab_id:
+                tabs_to_close.append(ctx.tab_snapshot.active_tab_id)
+            return JudgeVerdict(
+                activity=f"Visiting blocked domain: {domain_candidate}",
+                on_task=False,
+                confidence=1.0,
+                reason=f"{domain_candidate} is in the blocked domains list for goal '{profile.goal}'.",
+                tabs_to_close=tabs_to_close,
+                tier_used=0,
+                from_cache=False,
+                rate_limited=False,
+            )
+
+        # Allowed domains -> instantaneous on-task verdict
+        if _domain_matches(domain_candidate, profile.allowed_domains):
+            return JudgeVerdict(
+                activity=f"Browsing allowed domain: {domain_candidate}",
+                on_task=True,
+                confidence=1.0,
+                reason=f"{domain_candidate} is directly on-task for goal '{profile.goal}'.",
+                tabs_to_close=[],
+                tier_used=0,
+                from_cache=False,
+                rate_limited=False,
+            )
+
+    # 3. Check desktop application rules
+    proc = (
+        ctx.foreground_window.process_name if ctx.foreground_window else ctx.source_key
+    ).lower()
+    if proc:
+        proc_clean = proc.strip().lower()
+        if any(proc_clean == b.lower() for b in profile.blocked_apps):
+            return JudgeVerdict(
+                activity=f"Using blocked application: {proc}",
+                on_task=False,
+                confidence=1.0,
+                reason=f"{proc} is in the blocked apps list for goal '{profile.goal}'.",
+                tabs_to_close=[],
+                tier_used=0,
+                from_cache=False,
+                rate_limited=False,
+            )
+
+        if any(proc_clean == a.lower() for a in profile.allowed_apps):
+            return JudgeVerdict(
+                activity=f"Working in allowed application: {proc}",
+                on_task=True,
+                confidence=1.0,
+                reason=f"{proc} is in the allowed apps list for goal '{profile.goal}'.",
+                tabs_to_close=[],
+                tier_used=0,
+                from_cache=False,
+                rate_limited=False,
+            )
+
+    # 4. Unknown or ambiguous -> return None to escalate to Tier 1
+    return None
 
 
 def tier1_evaluate(

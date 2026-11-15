@@ -8,8 +8,8 @@
 - [x] **T1.3** (Flash) — Tier 1 Text Judge, Tier 2 Vision Judge, and Session Review AI Calls (`done`)
 - [x] **T2.1** (Flash) — FastAPI Local Receiver and Command Queue (`done`)
 - [x] **T2.2** (Flash) — Chrome/Edge Manifest V3 Extension (`done`)
-- [ ] **T3.1** (Flash) — Windows Foreground Window Watcher & Minimize Helper (`todo`)
-- [ ] **T3.2** (Flash) — Verdict Cache & Tier 0 Rule Evaluator (`todo`)
+- [x] **T3.1** (Flash) — Windows Foreground Window Watcher & Minimize Helper (`done`)
+- [x] **T3.2** (Flash) — Verdict Cache & Tier 0 Rule Evaluator (`done`)
 - [ ] **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`todo`)
 - [ ] **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`todo`)
 - [ ] **T5.1** (Flash) — SQLite Session & Activity Logger (`todo`)
@@ -49,7 +49,15 @@
   - Implemented 1.5s command polling loop with `chrome.alarms` keepalive fallback for service worker lifecycles.
   - Implemented strict-mode `chrome.tabs.remove` execution and `/commands/ack` reporting.
   - Verified syntax cleanly via Node.js and validated manifest schema.
-- **Next up**: **T3.1** (Flash) — Windows Foreground Window Watcher & Minimize Helper (`app/window_watcher.py`).
+- **T3.1 completed**:
+  - Implemented `get_foreground_window`, `list_open_window_titles`, `minimize_window`, and `WindowWatcher` in `app/window_watcher.py`.
+  - Added desktop station connection resilience and UWP `ApplicationFrameHost.exe` child process unwrapping.
+  - Acceptance tests passed: verified foreground window queries (`claude.exe`, `antigravity.exe`), window enumeration, safe minimization via `SW_MINIMIZE`, and background thread polling with change detection.
+- **T3.2 completed**:
+  - Implemented `VerdictCache` in `app/cache.py` with thread-safe locking, TTL expiry (1800s), normalized key generation (`source_key` and `title`), and `record_override`.
+  - Implemented `tier0_evaluate` in `app/judge.py` with cache-first lookup, domain rule matching (`allowed_domains`, `blocked_domains`), app matching (`allowed_apps`, `blocked_apps`), and borderline domain passthrough to `None`.
+  - Smoke tests passed: `instagram.com` -> on_task=False (tier 0, closes tab), `leetcode.com` -> on_task=True (tier 0), `youtube.com` -> None (borderline passthrough), `spotify.exe` -> on_task=False (tier 0), `code.exe` -> on_task=True (tier 0), user override -> on_task=True (cached), TTL expiration verified.
+- **Next up**: **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`app/event_engine.py`).
 
 ## Deviations
 - Updated `GEMINI_TEXT_MODEL` and `GEMINI_VISION_MODEL` in `app/config.py` to `gemini-3.5-flash-lite` and `gemini-3.5-flash` because the legacy 2.5 models were retired for new keys in AI Studio (HTTP 404).
