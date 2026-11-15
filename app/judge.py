@@ -359,6 +359,11 @@ def evaluate_context(
             return _safe_fallback(
                 ctx, profile, cache, "Gemini API rate limit hit at Tier 1", rate_limited=True
             )
+        except Exception as exc:
+            logger.warning("Tier 1 evaluation failed (%s); falling back to safe verdict.", exc)
+            return _safe_fallback(
+                ctx, profile, cache, f"Tier 1 evaluation failed ({exc})", rate_limited=False
+            )
 
         if tier1_verdict.confidence < TIER1_ESCALATION_CONFIDENCE:
             try:
@@ -381,6 +386,14 @@ def evaluate_context(
                 return _safe_fallback(
                     ctx, profile, cache, "Gemini API rate limit hit at Tier 2", rate_limited=True
                 )
+            except Exception as exc:
+                logger.warning(
+                    "Tier 2 escalation failed (%s); falling back to Tier 1.",
+                    exc,
+                )
+                gated = _apply_confidence_gate(tier1_verdict)
+                _cache_if_confident(ctx, gated, cache)
+                return gated
 
             final_verdict = _apply_confidence_gate(tier2_verdict)
             _cache_if_confident(ctx, final_verdict, cache)
@@ -434,6 +447,32 @@ def evaluate_context(
         return _safe_fallback(
             ctx, profile, cache, "Gemini API rate limit hit at Tier 2", rate_limited=True
         )
+    except Exception as exc:
+        logger.warning(
+            "Forced Tier 2 vision check failed (%s); falling back to Tier 1.",
+            exc,
+        )
+        try:
+            tier1_verdict = tier1_evaluate(ctx, profile, api_key)
+            final_verdict = _apply_confidence_gate(tier1_verdict)
+            _cache_if_confident(ctx, final_verdict, cache)
+            return final_verdict
+        except GeminiRateLimitError:
+            return _safe_fallback(
+                ctx,
+                profile,
+                cache,
+                "Tier 2 failed and Tier 1 hit rate limit",
+                rate_limited=True,
+            )
+        except Exception as tier1_exc:
+            return _safe_fallback(
+                ctx,
+                profile,
+                cache,
+                f"Tier 2 and Tier 1 failed ({tier1_exc})",
+                rate_limited=False,
+            )
 
     final_verdict = _apply_confidence_gate(tier2_verdict)
     _cache_if_confident(ctx, final_verdict, cache)

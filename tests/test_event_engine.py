@@ -295,6 +295,44 @@ class TestEvaluateContext(unittest.TestCase):
         self.assertTrue(v_safe.on_task)
         self.assertFalse(v_safe.rate_limited)
 
+    def test_non_rate_limit_exception_fallbacks(self) -> None:
+        ctx = _make_browser_ctx("unknown-docs.org", "Graph Algorithms", tab_id=21)
+
+        # Tier 1 transient error falls back to Tier 0 / safe on-task
+        with patch("app.judge.tier1_evaluate", side_effect=RuntimeError("Timeout")):
+            v1 = evaluate_context(ctx, self.profile, self.cache, "fake-key")
+        self.assertTrue(v1.on_task)
+        self.assertFalse(v1.rate_limited)
+        self.assertEqual(v1.tier_used, 0)
+
+        # Tier 2 escalation error falls back to Tier 1 verdict
+        t1_low = JudgeVerdict(
+            activity="Reading docs",
+            on_task=True,
+            confidence=0.65,
+            reason="Likely on-task.",
+            tabs_to_close=[],
+            tier_used=1,
+        )
+        with (
+            patch("app.judge.tier1_evaluate", return_value=t1_low),
+            patch("app.screen.capture_screenshot_bytes", return_value=b"\xff\xd8fakejpeg"),
+            patch("app.judge.tier2_evaluate", side_effect=ValueError("Bad JSON")),
+        ):
+            v2 = evaluate_context(ctx, self.profile, self.cache, "fake-key")
+        self.assertTrue(v2.on_task)
+        self.assertEqual(v2.tier_used, 1)
+
+        # Forced vision Tier 2 error falls back to Tier 1, or safe on-task if Tier 1 also fails
+        with (
+            patch("app.screen.capture_screenshot_bytes", return_value=b"\xff\xd8fakejpeg"),
+            patch("app.judge.tier2_evaluate", side_effect=RuntimeError("Vision error")),
+            patch("app.judge.tier1_evaluate", side_effect=RuntimeError("Text error")),
+        ):
+            v3 = evaluate_context(ctx, self.profile, self.cache, "fake-key", force_vision=True)
+        self.assertTrue(v3.on_task)
+        self.assertFalse(v3.rate_limited)
+
 
 class TestEventEngine(unittest.TestCase):
     def setUp(self) -> None:
@@ -703,6 +741,96 @@ class TestEventEngine(unittest.TestCase):
                 mock_t1.assert_called_once()
             finally:
                 engine.stop()
+
+    def test_mocked_clock_drives_debounce_heartbeat_and_dwell_without_real_sleep(self) -> None:
+        win = self._set_active_site("youtube.com", "Graphs Tutorial - YouTube")
+        clock_lock = threading.Lock()
+        current_time = 100.0
+
+        def fake_clock() -> float:
+            with clock_lock:
+                return current_time
+
+        def advance(seconds: float) -> None:
+            nonlocal current_time
+            with clock_lock:
+                current_time += seconds
+
+        events: list[tuple[str, bool]] = []
+        cond = threading.Condition()
+
+        def fake_eval(
+            ctx: ActivityContext,
+            profile: GoalProfile,
+            cache: VerdictCache,
+            api_key: str,
+            force_vision: bool = False,
+        ) -> JudgeVerdict:
+            return JudgeVerdict(
+                activity="Watching tutorial",
+                on_task=True,
+                confidence=0.9,
+                reason="On-task",
+                tabs_to_close=[],
+                tier_used=2 if force_vision else 1,
+            )
+
+        def on_verdict(ctx: ActivityContext, verdict: JudgeVerdict) -> None:
+            with cond:
+                events.append((ctx.trigger_type, verdict.tier_used == 2))
+                cond.notify_all()
+
+        engine = EventEngine(
+            goal="Study DSA",
+            profile=self.profile,
+            cache=self.cache,
+            tab_store=self.tab_store,
+            timings=TimingConfig(
+                debounce_seconds=1.5,
+                heartbeat_seconds=10.0,
+                dwell_seconds=15.0,
+                grace_period_seconds=5.0,
+                strict_lockout_seconds=8.0,
+                extension_poll_seconds=1.5,
+                window_poll_seconds=0.5,
+            ),
+            api_key="fake-key",
+            on_verdict=on_verdict,
+            get_foreground_fn=lambda: win,
+            list_windows_fn=lambda: ["Graphs Tutorial (chrome.exe)"],
+            evaluate_fn=fake_eval,
+            clock_fn=fake_clock,
+        )
+
+        try:
+            engine.start()
+            with cond:
+                self.assertTrue(cond.wait_for(lambda: len(events) == 1, timeout=1.0))
+            self.assertEqual(events[0], ("baseline", True))
+
+            # Two triggers separated by 1.0s (< 1.5s debounce) collapse into the second one
+            advance(1.0)
+            engine.submit_trigger("tab_activated")
+            advance(1.0)
+            engine.submit_trigger("tab_updated")
+            advance(1.5)  # now = 103.5 -> debounce fires, sets dwell at 118.5
+            with cond:
+                self.assertTrue(cond.wait_for(lambda: len(events) == 2, timeout=1.0))
+            self.assertEqual(events[1], ("tab_updated", False))
+
+            # Advance to first heartbeat at 110.0
+            advance(6.5)
+            with cond:
+                self.assertTrue(cond.wait_for(lambda: len(events) == 3, timeout=1.0))
+            self.assertEqual(events[2], ("heartbeat", True))
+
+            # Advance to borderline dwell at 118.5
+            advance(8.5)
+            with cond:
+                self.assertTrue(cond.wait_for(lambda: len(events) == 4, timeout=1.0))
+            self.assertEqual(events[3], ("dwell", True))
+        finally:
+            engine.stop()
 
 
 if __name__ == "__main__":

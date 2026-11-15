@@ -164,7 +164,13 @@ class EventEngine:
 
         if run_sync:
             with self._sync_check_lock:
-                self._execute_check(trigger_type, force_vision)
+                try:
+                    self._execute_check(trigger_type, force_vision)
+                except Exception:
+                    logger.exception(
+                        "Unhandled exception in synchronous EventEngine check (%s).",
+                        trigger_type,
+                    )
 
     def _worker_loop(self) -> None:
         while True:
