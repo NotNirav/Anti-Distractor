@@ -239,13 +239,28 @@ class TkinterUI:
         def _action() -> None:
             self._clear_root_widgets()
             self.root.title("Anti-Distractor — HUD")
-            self.root.geometry("380x140")
-            self.root.minsize(360, 130)
+            self.root.geometry("380x135")
+            self.root.minsize(360, 125)
             self.root.attributes("-topmost", True)
 
             frame = ttk.Frame(self.root, padding="10 10 10 10")
             frame.pack(fill="both", expand=True)
             self._current_frame = frame
+
+            # Enable dragging HUD window from anywhere on the frame/headers
+            self._drag_data = {"x": 0, "y": 0}
+
+            def _start_drag(event: tk.Event) -> None:
+                self._drag_data["x"] = event.x
+                self._drag_data["y"] = event.y
+
+            def _on_drag(event: tk.Event) -> None:
+                x = self.root.winfo_x() + (event.x - self._drag_data["x"])
+                y = self.root.winfo_y() + (event.y - self._drag_data["y"])
+                self.root.geometry(f"+{x}+{y}")
+
+            self._hud_start_drag = _start_drag
+            self._hud_on_drag = _on_drag
 
             # Top row: Goal and Mode
             top_row = ttk.Frame(frame)
@@ -289,8 +304,13 @@ class TkinterUI:
                 status_row,
                 text="Monitoring active.",
                 font=("Segoe UI", 9),
+                wraplength=270,
             )
-            self._hud_summary_label.pack(side="left", padx=(8, 0))
+            self._hud_summary_label.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+            for w in (frame, top_row, self._hud_goal_label, status_row):
+                w.bind("<Button-1>", _start_drag)
+                w.bind("<B1-Motion>", _on_drag)
 
             # Bottom row: End Session Button
             end_btn = ttk.Button(
@@ -311,8 +331,12 @@ class TkinterUI:
                 self._hud_state_label.config(text=f" {state} ", bg=bg, fg=fg)
 
             if self._hud_summary_label is not None and self._hud_summary_label.winfo_exists():
-                display_summary = summary if len(summary) <= 40 else f"{summary[:37]}..."
+                display_summary = summary if len(summary) <= 50 else f"{summary[:47]}..."
                 self._hud_summary_label.config(text=display_summary)
+                if "AI unavailable" in summary:
+                    self._hud_summary_label.config(font=("Segoe UI", 9, "bold"))
+                else:
+                    self._hud_summary_label.config(font=("Segoe UI", 9))
 
         self.dispatch(_action)
 

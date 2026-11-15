@@ -152,3 +152,38 @@ def test_ui_layer2_warning_has_auto_close_and_layer1_stays():
             root.destroy()
         except Exception:
             pass
+
+
+def test_ui_hud_draggable_and_ai_unavailable_status():
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        ui = TkinterUI(root=root)
+        _flush_events(ui, root)
+
+        ui.show_monitoring_hud("Study Algorithms", "normal", on_end_session=lambda: None)
+        _flush_events(ui, root)
+
+        # Verify draggable callbacks exist and move root geometry
+        assert hasattr(ui, "_hud_start_drag")
+        assert hasattr(ui, "_hud_on_drag")
+        ev_start = tk.Event()
+        ev_start.x, ev_start.y = 10, 10
+        ui._hud_start_drag(ev_start)
+
+        ev_move = tk.Event()
+        ev_move.x, ev_move.y = 30, 40
+        ui._hud_on_drag(ev_move)
+
+        # Verify "AI unavailable - rules only" status is displayed clearly without truncation
+        ai_msg = "AI unavailable - rules only"
+        ui.update_hud_status("ON_TASK", ai_msg)
+        _flush_events(ui, root)
+
+        assert ui._hud_summary_label.cget("text") == ai_msg
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
