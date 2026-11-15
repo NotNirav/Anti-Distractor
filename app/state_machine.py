@@ -478,7 +478,7 @@ class AgentStateMachine:
         decision = AgentDecision(
             state="LAYER_2_ULTIMATUM",
             action_taken="strict_block",
-            message=reason,
+            message=f"Start {self.goal} again. {reason}",
             tabs_to_close=tabs_to_close,
             minimize_hwnd=minimize_hwnd,
             lockout_seconds=lockout_seconds,
@@ -528,11 +528,14 @@ class AgentStateMachine:
                     self.ui_hooks, "hide_popups_and_overlay"
                 ):
                     self.ui_hooks.hide_popups_and_overlay()
-
-                if hasattr(self.ui_hooks, "update_hud_status"):
-                    self.ui_hooks.update_hud_status(decision.state, decision.message)
             except Exception:
                 logger.exception("UI hook dispatch failed for action %s", kind)
+
+            if hasattr(self.ui_hooks, "update_hud_status"):
+                try:
+                    self.ui_hooks.update_hud_status(decision.state, decision.message)
+                except Exception:
+                    logger.exception("UI hook update_hud_status failed")
 
         if self.on_decision is not None:
             try:

@@ -11,7 +11,7 @@
 - [x] **T3.1** (Flash) — Windows Foreground Window Watcher & Minimize Helper (`done`)
 - [x] **T3.2** (Flash) — Verdict Cache & Tier 0 Rule Evaluator (`done`)
 - [x] **T3.3** (Hydrogen) — Event Engine, Tier Escalation, Dwell/Heartbeat, and Rate-Limit Fallback (`done`)
-- [ ] **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`todo`)
+- [x] **T4.1** (Hydrogen) — Deterministic Agent State Machine & Strict Mode Enforcement (`done`)
 - [ ] **T5.1** (Flash) — SQLite Session & Activity Logger (`todo`)
 - [ ] **T5.2** (Flash) — Tkinter Setup Window, Monitoring HUD, and End-of-Session Review Screen (`todo`)
 - [ ] **T5.3** (Hydrogen) — Layer 1/2 Popups, Strict Full-Screen Overlay, and Main App Threading Orchestration (`todo`)
