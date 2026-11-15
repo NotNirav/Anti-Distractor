@@ -167,153 +167,199 @@ class AppController:
         self.ui.show_setup(on_start=self.start_session)
 
     def start_session(self, goal: str, duration_minutes: int, mode: ModeType) -> None:
-        """Initialize session components, start background threads, and begin monitoring."""
+        """Show HUD immediately and initialize session components in a background thread."""
         with self._lock:
-            if self.session_active:
+            if self.session_active or getattr(self, "_starting", False):
                 return
+            self._starting = True
             self._ending = False
             self.current_goal = goal
             self._current_mode = mode
             self._last_log_id = None
 
-        if self.fake_judge:
-            profile = fallback_goal_profile(goal)
-        else:
-            try:
-                profile = self._profile_fn(goal, self.api_key)
-            except Exception:
-                logger.exception("Goal profile generation failed; using fallback profile")
-                profile = fallback_goal_profile(goal)
-
-        session_logger = self._session_logger_cls(db_path=self.db_path)
-        session_logger.init_db()
-        session_id = session_logger.start_session(goal, mode, duration_minutes, profile)
-
-        model_manager = get_model_manager()
-        def _on_tier0_shift(msg: str) -> None:
-            if hasattr(self.ui, "show_tier0_shift_popup"):
-                try:
-                    self.ui.show_tier0_shift_popup(msg)
-                except Exception:
-                    logger.exception("Failed to show Tier 0 shift popup")
-            if hasattr(self.ui, "update_hud_status"):
-                try:
-                    self.ui.update_hud_status("ON_TASK", "AI unavailable - rules only")
-                except Exception:
-                    pass
-
-        model_manager.on_shift_to_tier0 = _on_tier0_shift
-
-        tab_store = TabSnapshotStore()
-        command_queue = CommandQueue()
-        cache = VerdictCache()
-
-        def _on_override(_ctx: ActivityContext | None, _reason: str) -> None:
-            with self._lock:
-                log_id = self._last_log_id
-            if log_id is not None:
-                try:
-                    session_logger.mark_override(log_id)
-                except Exception:
-                    logger.exception("Failed to mark override in SQLite")
-
-        def _on_lockout_done() -> None:
-            with self._lock:
-                eng = self.engine
-            if eng is not None:
-                try:
-                    eng.run_immediate_check("manual_recheck", force_vision=True)
-                except Exception:
-                    logger.exception("Failed to run post-lockout immediate check")
-
-        state_machine = AgentStateMachine(
-            goal=goal,
-            mode=mode,
-            timings=self.timings,
-            cache=cache,
-            command_queue=command_queue,
-            ui_hooks=self.ui,
-            on_override=_on_override,
-            on_lockout_done=_on_lockout_done,
-        )
-
-        def _on_verdict(ctx: ActivityContext, verdict: JudgeVerdict) -> None:
-            try:
-                decision = state_machine.handle_verdict(ctx, verdict)
-            except Exception:
-                logger.exception("State machine handle_verdict failed")
-                return
-            try:
-                log_id = session_logger.log_event(
-                    session_id=session_id,
-                    ctx=ctx,
-                    verdict=verdict,
-                    action_taken=decision.action_taken,
-                )
-                with self._lock:
-                    self._last_log_id = log_id
-            except Exception:
-                logger.exception("Failed to log verdict to SQLite")
-
-        evaluate_fn = make_fake_judge() if self.fake_judge else None
-        engine = self._engine_cls(
-            goal=goal,
-            profile=profile,
-            cache=cache,
-            tab_store=tab_store,
-            timings=self.timings,
-            api_key=self.api_key,
-            on_verdict=_on_verdict,
-            evaluate_fn=evaluate_fn,
-        )
-
-        def _on_tab_event(trigger_type: Any) -> None:
-            try:
-                engine.submit_trigger(trigger_type)
-            except Exception:
-                logger.exception("submit_trigger failed on tab event")
-
-        def _on_window_changed(_info: Any) -> None:
-            try:
-                engine.submit_trigger("window_changed")
-            except Exception:
-                logger.exception("submit_trigger failed on window change")
-
-        watcher = self._watcher_cls(
-            on_window_changed=_on_window_changed,
-            poll_interval=self.timings.window_poll_seconds,
-        )
-
-        fastapi_app = self._app_factory(
-            tab_store=tab_store,
-            command_queue=command_queue,
-            on_tab_event=_on_tab_event,
-            session_status_provider=lambda: (self.session_active, self.current_goal),
-        )
-        try:
-            server_handle = self._server_starter(fastapi_app, host=self.host, port=self.port)
-        except Exception:
-            logger.exception("Failed to start FastAPI bridge server")
-            server_handle = None
-
-        with self._lock:
-            self.logger = session_logger
-            self._session_id = session_id
-            self.tab_store = tab_store
-            self.command_queue = command_queue
-            self.cache = cache
-            self.state_machine = state_machine
-            self.engine = engine
-            self.watcher = watcher
-            self.server_handle = server_handle
-            self.session_active = True
-            self._session_deadline = time.monotonic() + max(1, duration_minutes) * 60.0
-
         self.ui.show_monitoring_hud(goal, mode, on_end_session=self.end_session)
-        watcher.start()
-        engine.start()
-        engine.run_immediate_check("baseline", force_vision=False)
-        self._schedule_tick()
+        if hasattr(self.ui, "update_hud_status"):
+            try:
+                self.ui.update_hud_status("ON_TASK", "Starting...")
+            except Exception:
+                pass
+
+        def _startup_worker() -> None:
+            try:
+                if self.fake_judge:
+                    profile = fallback_goal_profile(goal)
+                else:
+                    try:
+                        profile = self._profile_fn(goal, self.api_key)
+                    except Exception:
+                        logger.exception("Goal profile generation failed; using fallback profile")
+                        profile = fallback_goal_profile(goal)
+
+                session_logger = self._session_logger_cls(db_path=self.db_path)
+                session_logger.init_db()
+                session_id = session_logger.start_session(goal, mode, duration_minutes, profile)
+
+                model_manager = get_model_manager()
+                def _on_tier0_shift(msg: str) -> None:
+                    if hasattr(self.ui, "show_tier0_shift_popup"):
+                        try:
+                            self.ui.show_tier0_shift_popup(msg)
+                        except Exception:
+                            logger.exception("Failed to show Tier 0 shift popup")
+                    if hasattr(self.ui, "update_hud_status"):
+                        try:
+                            self.ui.update_hud_status("ON_TASK", "AI unavailable - rules only")
+                        except Exception:
+                            pass
+
+                model_manager.on_shift_to_tier0 = _on_tier0_shift
+
+                tab_store = TabSnapshotStore()
+                command_queue = CommandQueue()
+                cache = VerdictCache()
+
+                def _on_override(_ctx: ActivityContext | None, _reason: str) -> None:
+                    with self._lock:
+                        log_id = self._last_log_id
+                    if log_id is not None:
+                        try:
+                            session_logger.mark_override(log_id)
+                        except Exception:
+                            logger.exception("Failed to mark override in SQLite")
+
+                def _on_lockout_done() -> None:
+                    with self._lock:
+                        eng = self.engine
+                    if eng is not None:
+                        try:
+                            eng.run_immediate_check("manual_recheck", force_vision=True)
+                        except Exception:
+                            logger.exception("Failed to run post-lockout immediate check")
+
+                state_machine = AgentStateMachine(
+                    goal=goal,
+                    mode=mode,
+                    timings=self.timings,
+                    cache=cache,
+                    command_queue=command_queue,
+                    ui_hooks=self.ui,
+                    on_override=_on_override,
+                    on_lockout_done=_on_lockout_done,
+                )
+
+                def _on_verdict(ctx: ActivityContext, verdict: JudgeVerdict) -> None:
+                    try:
+                        decision = state_machine.handle_verdict(ctx, verdict)
+                    except Exception:
+                        logger.exception("State machine handle_verdict failed")
+                        return
+                    try:
+                        log_id = session_logger.log_event(
+                            session_id=session_id,
+                            ctx=ctx,
+                            verdict=verdict,
+                            action_taken=decision.action_taken,
+                        )
+                        with self._lock:
+                            self._last_log_id = log_id
+                    except Exception:
+                        logger.exception("Failed to log verdict to SQLite")
+
+                evaluate_fn = make_fake_judge() if self.fake_judge else None
+                engine = self._engine_cls(
+                    goal=goal,
+                    profile=profile,
+                    cache=cache,
+                    tab_store=tab_store,
+                    timings=self.timings,
+                    api_key=self.api_key,
+                    on_verdict=_on_verdict,
+                    evaluate_fn=evaluate_fn,
+                )
+
+                def _on_tab_event(trigger_type: Any) -> None:
+                    try:
+                        engine.submit_trigger(trigger_type)
+                    except Exception:
+                        logger.exception("submit_trigger failed on tab event")
+
+                def _on_window_changed(_info: Any) -> None:
+                    try:
+                        engine.submit_trigger("window_changed")
+                    except Exception:
+                        logger.exception("submit_trigger failed on window change")
+
+                watcher = self._watcher_cls(
+                    on_window_changed=_on_window_changed,
+                    poll_interval=self.timings.window_poll_seconds,
+                )
+
+                fastapi_app = self._app_factory(
+                    tab_store=tab_store,
+                    command_queue=command_queue,
+                    on_tab_event=_on_tab_event,
+                    session_status_provider=lambda: (self.session_active, self.current_goal),
+                )
+                try:
+                    server_handle = self._server_starter(fastapi_app, host=self.host, port=self.port)
+                except Exception:
+                    logger.exception("Failed to start FastAPI bridge server")
+                    server_handle = None
+
+                with self._lock:
+                    if self._ending:
+                        if server_handle is not None and hasattr(server_handle, "stop"):
+                            try:
+                                server_handle.stop()
+                            except Exception:
+                                pass
+                        return
+                    self.logger = session_logger
+                    self._session_id = session_id
+                    self.tab_store = tab_store
+                    self.command_queue = command_queue
+                    self.cache = cache
+                    self.state_machine = state_machine
+                    self.engine = engine
+                    self.watcher = watcher
+                    self.server_handle = server_handle
+                    self.session_active = True
+                    self._session_deadline = time.monotonic() + max(1, duration_minutes) * 60.0
+
+                watcher.start()
+                engine.start()
+                engine.run_immediate_check("baseline", force_vision=False)
+                if hasattr(self.ui, "update_hud_status"):
+                    try:
+                        self.ui.update_hud_status("ON_TASK", "Monitoring active.")
+                    except Exception:
+                        pass
+                if hasattr(self.ui, "dispatch"):
+                    self.ui.dispatch(self._schedule_tick)
+                else:
+                    self._schedule_tick()
+            except Exception:
+                logger.exception("Session startup failed")
+                if hasattr(self.ui, "update_hud_status"):
+                    try:
+                        self.ui.update_hud_status("ON_TASK", "Startup fallback error.")
+                    except Exception:
+                        pass
+            finally:
+                with self._lock:
+                    self._starting = False
+
+        t = threading.Thread(target=_startup_worker, daemon=True, name="session-startup")
+        with self._lock:
+            self._startup_thread = t
+        t.start()
+
+    def wait_for_startup(self, timeout: float = 5.0) -> None:
+        """Wait for background session startup thread to finish (for tests)."""
+        with self._lock:
+            t = getattr(self, "_startup_thread", None)
+        if t is not None:
+            t.join(timeout=timeout)
 
     def _schedule_tick(self) -> None:
         with self._lock:

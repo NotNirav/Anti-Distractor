@@ -219,6 +219,40 @@ class TestEvaluateContext(unittest.TestCase):
         self.assertEqual(verdict.tabs_to_close, [])
         self.assertEqual(verdict.tier_used, 2)
 
+
+    def test_vision_cooldown_blocks_second_vision_call_and_returns_tier1(self) -> None:
+        ctx = _make_browser_ctx("youtube.com", "Ambiguous Video", tab_id=77)
+        t1_unsure = JudgeVerdict(
+            activity="Ambiguous YouTube video",
+            on_task=True,
+            confidence=0.55,
+            reason="Title is ambiguous.",
+            tabs_to_close=[],
+            tier_used=1,
+        )
+        t2_sure = JudgeVerdict(
+            activity="Watching lecture",
+            on_task=True,
+            confidence=0.92,
+            reason="Lecture visible.",
+            tabs_to_close=[],
+            tier_used=2,
+        )
+        with (
+            patch("app.judge.tier1_evaluate", return_value=t1_unsure) as mock_t1,
+            patch("app.screen.capture_screenshot_bytes", return_value=b"\xff\xd8fakejpeg") as mock_shot,
+            patch("app.judge.tier2_evaluate", return_value=t2_sure) as mock_t2,
+        ):
+            v1 = evaluate_context(ctx, self.profile, self.cache, "fake-key", force_vision=True)
+            v2 = evaluate_context(ctx, self.profile, self.cache, "fake-key", force_vision=True)
+
+        self.assertEqual(v1.tier_used, 2)
+        self.assertEqual(v2.tier_used, 1)
+        self.assertFalse(v2.rate_limited)
+        mock_t2.assert_called_once()
+        mock_shot.assert_called_once()
+        mock_t1.assert_called_once()
+
     def test_force_vision_bypasses_cache(self) -> None:
         ctx = _make_browser_ctx("youtube.com", "DSA Lecture", tab_id=55)
         self.cache.record_override("youtube.com", "DSA Lecture")
@@ -475,7 +509,9 @@ class TestEventEngine(unittest.TestCase):
                     )
                 self.assertTrue(ok, f"Expected both dwell and heartbeat triggers; got {seen}")
                 for trig, tier in seen:
-                    if trig in ("baseline", "dwell", "heartbeat"):
+                    if trig == "heartbeat":
+                        self.assertEqual(tier, 1)
+                    elif trig == "baseline":
                         self.assertEqual(tier, 2)
             finally:
                 engine.stop()
@@ -822,7 +858,7 @@ class TestEventEngine(unittest.TestCase):
             advance(6.5)
             with cond:
                 self.assertTrue(cond.wait_for(lambda: len(events) == 3, timeout=1.0))
-            self.assertEqual(events[2], ("heartbeat", True))
+            self.assertEqual(events[2], ("heartbeat", False))
 
             # Advance to borderline dwell at 118.5
             advance(8.5)

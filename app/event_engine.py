@@ -197,7 +197,7 @@ class EventEngine:
 
                     if self._next_heartbeat_at is not None and now >= self._next_heartbeat_at:
                         self._next_heartbeat_at = now + self.timings.heartbeat_seconds
-                        task = ("heartbeat", True)
+                        task = ("heartbeat", False)
                         break
 
                     deadlines = [
@@ -367,6 +367,8 @@ class EventEngine:
         return verdict
 
     def _execute_check(self, trigger_type: TriggerType, force_vision: bool) -> None:
+        if trigger_type == "heartbeat":
+            force_vision = False
         ctx = self._build_context(trigger_type)
 
         # Avoid wasting a Tier 2 dwell check if the user already moved off a borderline domain

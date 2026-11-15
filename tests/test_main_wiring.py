@@ -140,6 +140,7 @@ def test_main_wiring_start_verdict_tick_lockout_and_stop(tmp_path: Path) -> None
 
     # Start session
     ui.setup_cb("Study DSA", 25, "strict")
+    controller.wait_for_startup()
     assert controller.session_active is True
     assert controller.watcher is not None and controller.watcher.started is True
     assert controller.engine is not None and controller.engine.started is True

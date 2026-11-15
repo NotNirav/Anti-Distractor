@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 import logging
 import threading
+import time
 from typing import Any, Callable
 
 from google import genai
@@ -24,6 +25,7 @@ from app.config import (
     PUNISH_CONFIDENCE_THRESHOLD,
     SCREENSHOT_MAX_WIDTH,
     TIER1_ESCALATION_CONFIDENCE,
+    VISION_MIN_INTERVAL_SECONDS,
 )
 from app.models import ActivityContext, GoalProfile, JudgeVerdict, ModeType
 from app.profile import normalize_domain
@@ -594,6 +596,29 @@ def _cache_if_confident(ctx: ActivityContext, verdict: JudgeVerdict, cache: Verd
         cache.put(ctx.source_key, ctx.display_title, verdict)
 
 
+_vision_lock = threading.Lock()
+_last_vision_call_at: float | None = None
+
+
+def reset_vision_cooldown() -> None:
+    """Reset the global vision cooldown timestamp (for tests)."""
+    global _last_vision_call_at
+    with _vision_lock:
+        _last_vision_call_at = None
+
+
+def _try_acquire_vision_slot(min_interval: float | None = None) -> bool:
+    """Enforce global minimum interval between Tier 2 vision calls."""
+    global _last_vision_call_at
+    interval = VISION_MIN_INTERVAL_SECONDS if min_interval is None else min_interval
+    now = time.monotonic()
+    with _vision_lock:
+        if _last_vision_call_at is not None and (now - _last_vision_call_at) < interval:
+            return False
+        _last_vision_call_at = now
+        return True
+
+
 def evaluate_context(
     ctx: ActivityContext,
     profile: GoalProfile,
@@ -638,6 +663,11 @@ def evaluate_context(
             )
 
         if tier1_verdict.confidence < TIER1_ESCALATION_CONFIDENCE:
+            if not _try_acquire_vision_slot():
+                logger.info("Vision cooldown active; returning Tier 1 verdict without Tier 2.")
+                gated = _apply_confidence_gate(tier1_verdict)
+                _cache_if_confident(ctx, gated, cache)
+                return gated
             try:
                 screenshot_bytes = app.screen.capture_screenshot_bytes(
                     max_width=SCREENSHOT_MAX_WIDTH
@@ -675,7 +705,23 @@ def evaluate_context(
         _cache_if_confident(ctx, final_verdict, cache)
         return final_verdict
 
-    # force_vision=True (baseline, dwell, heartbeat, manual_recheck): bypass cache and run Tier 2
+    # force_vision=True (dwell, manual_recheck): bypass cache and run Tier 2 unless cooldown blocks it
+    if not _try_acquire_vision_slot():
+        logger.info("Vision cooldown active; falling back to Tier 1 instead of Tier 2.")
+        try:
+            tier1_verdict = tier1_evaluate(ctx, profile, api_key, model_manager=mgr)
+            final_verdict = _apply_confidence_gate(tier1_verdict)
+            _cache_if_confident(ctx, final_verdict, cache)
+            return final_verdict
+        except GeminiRateLimitError:
+            return _safe_fallback(
+                ctx, profile, cache, "Vision cooldown active and AI models hit rate limits", rate_limited=True
+            )
+        except Exception as tier1_exc:
+            return _safe_fallback(
+                ctx, profile, cache, f"Vision cooldown active and Tier 1 failed ({tier1_exc})", rate_limited=False
+            )
+
     try:
         screenshot_bytes = app.screen.capture_screenshot_bytes(
             max_width=SCREENSHOT_MAX_WIDTH

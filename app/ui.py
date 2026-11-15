@@ -208,7 +208,8 @@ class TkinterUI:
                     return
 
                 selected_mode: ModeType = "strict" if mode_var.get() == "strict" else "normal"
-                status_lbl.config(text="Preparing profile and starting session...")
+                start_btn.config(state="disabled")
+                status_lbl.config(text="Starting...")
                 on_start(goal_val, dur_val, selected_mode)
 
             start_btn = ttk.Button(

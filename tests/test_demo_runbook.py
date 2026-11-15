@@ -126,6 +126,7 @@ def test_two_minute_demo_script_walkthrough():
         # ---------------------------------------------------------
         controller.start()
         controller.start_session(goal="DSA", duration_minutes=25, mode="strict")
+        controller.wait_for_startup()
         controller.engine._get_foreground_fn = lambda: current_fg[0]
 
         assert mock_ui.hud_shown is True
@@ -239,6 +240,7 @@ def test_extension_disconnect_resilience():
             cancel_schedule_fn=lambda h: None,
         )
         controller.start_session("DSA", 25, "strict")
+        controller.wait_for_startup()
 
         # Foreground window is a blocked desktop app (spotify.exe)
         current_win = [WindowInfo(hwnd=99, title="Spotify Free", process_name="spotify.exe", pid=456, is_browser=False)]
