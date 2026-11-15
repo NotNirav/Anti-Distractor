@@ -101,6 +101,7 @@ class JudgeVerdict:
     tier_used: int
     from_cache: bool = False
     rate_limited: bool = False
+    model_used: str = ""
 
 
 @dataclass

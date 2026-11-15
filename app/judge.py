@@ -221,7 +221,9 @@ def _extract_json_string(text: str) -> str:
     return cleaned
 
 
-def _parse_verdict_response(raw_text: str | None, ctx: ActivityContext, tier_used: int) -> JudgeVerdict:
+def _parse_verdict_response(
+    raw_text: str | None, ctx: ActivityContext, tier_used: int, model_used: str = ""
+) -> JudgeVerdict:
     """Parse and validate the JSON verdict string from Gemini or Gemma, filtering out invented tab IDs."""
     if not raw_text or not raw_text.strip():
         raise ValueError(f"Empty response from Tier {tier_used} judge.")
@@ -237,6 +239,7 @@ def _parse_verdict_response(raw_text: str | None, ctx: ActivityContext, tier_use
         tier_used=tier_used,
         from_cache=False,
         rate_limited=False,
+        model_used=model_used,
     )
 
 
@@ -444,7 +447,7 @@ Instructions:
             parts = response.candidates[0].content.parts
             text_parts = [p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False)]
             raw_text = "".join(text_parts) if text_parts else "".join(p.text for p in parts if getattr(p, "text", None))
-        return _parse_verdict_response(raw_text, ctx, tier_used=1)
+        return _parse_verdict_response(raw_text, ctx, tier_used=1, model_used=model_name)
 
     if model is not None:
         return _eval_with_model(model)
@@ -524,7 +527,7 @@ Visual Evaluation Instructions:
             parts = response.candidates[0].content.parts
             text_parts = [p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False)]
             raw_text = "".join(text_parts) if text_parts else "".join(p.text for p in parts if getattr(p, "text", None))
-        return _parse_verdict_response(raw_text, ctx, tier_used=2)
+        return _parse_verdict_response(raw_text, ctx, tier_used=2, model_used=model_name)
 
     if model is not None:
         return _eval_with_model(model)
