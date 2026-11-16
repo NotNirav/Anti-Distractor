@@ -477,7 +477,7 @@ class AppController:
                 logger.exception("Error stopping uvicorn server")
 
     def end_session(self) -> None:
-        """Stop monitoring, persist session review, and show the review screen."""
+        """Stop monitoring, show review screen immediately, and generate review off the UI thread."""
         with self._lock:
             if self._ending or not self.session_active:
                 return
@@ -487,8 +487,12 @@ class AppController:
             session_id = self._session_id
             goal = self.current_goal or ""
             mode = self._current_mode
+            api_key = self.api_key
 
-        self._stop_background_services()
+        try:
+            self._stop_background_services()
+        except Exception:
+            logger.exception("Error stopping background services")
 
         if sm is not None:
             try:
@@ -496,41 +500,91 @@ class AppController:
             except Exception:
                 logger.exception("Error ending state machine")
 
-        logs: list[dict[str, Any]] = []
-        if session_logger is not None and session_id is not None:
-            try:
-                logs = session_logger.get_session_logs(session_id)
-            except Exception:
-                logger.exception("Failed to fetch session logs")
-
         try:
-            review_text = self._review_fn(goal, mode, logs, self.api_key)
+            self.ui.show_review("Generating your review...", on_close=self.shutdown)
         except Exception:
-            logger.exception("Review generation failed")
-            review_text = f"## Focus Session Review\n\nGoal: {goal}\nChecks logged: {len(logs)}"
+            logger.exception("Failed to show initial review screen")
 
-        # Compute per-model counts from session logs
-        model_counts: dict[str, int] = {}
-        for row in logs:
-            m = row.get("model_used")
-            if m:
-                model_counts[m] = model_counts.get(m, 0) + 1
-            elif row.get("tier_used") == 0:
-                model_counts["Tier 0 (rules)"] = model_counts.get("Tier 0 (rules)", 0) + 1
+        def _local_summary(logs: list[dict[str, Any]]) -> str:
+            total = len(logs)
+            if total == 0:
+                return f"Session completed for goal: '{goal}' ({mode} mode). No activity recorded."
+            on_task_count = sum(1 for row in logs if bool(row.get("on_task")))
+            pct = int((on_task_count / total) * 100)
+            return f"Session summary for '{goal}' ({mode} mode): {pct}% on-task across {total} checks."
 
-        if model_counts:
-            breakdown_lines = ["\n\n### Model Usage:"]
-            for m_name, count in sorted(model_counts.items(), key=lambda x: -x[1]):
-                breakdown_lines.append(f"- {m_name}: {count}")
-            review_text += "\n".join(breakdown_lines)
-
-        if session_logger is not None and session_id is not None:
+        def _review_worker() -> None:
+            logs: list[dict[str, Any]] = []
+            review_text = ""
             try:
-                session_logger.finish_session(session_id, review_text)
-            except Exception:
-                logger.exception("Failed to save session review to SQLite")
+                if session_logger is not None and session_id is not None:
+                    try:
+                        logs = session_logger.get_session_logs(session_id)
+                    except Exception:
+                        logger.exception("Failed to fetch session logs")
 
-        self.ui.show_review(review_text, on_close=self.shutdown)
+                fallback_text = _local_summary(logs)
+                review_box: list[str] = []
+                done_event = threading.Event()
+
+                def _run_review_fn() -> None:
+                    try:
+                        text = self._review_fn(goal, mode, logs, api_key)
+                        review_box.append((text or "").strip() or fallback_text)
+                    except Exception:
+                        logger.exception("Review generation failed")
+                        review_box.append(fallback_text)
+                    finally:
+                        done_event.set()
+
+                inner = threading.Thread(target=_run_review_fn, daemon=True, name="session-review-fn")
+                inner.start()
+                if done_event.wait(timeout=15.0) and review_box:
+                    review_text = review_box[0]
+                else:
+                    review_text = fallback_text
+
+                model_counts: dict[str, int] = {}
+                for row in logs:
+                    m = row.get("model_used")
+                    if m:
+                        model_counts[m] = model_counts.get(m, 0) + 1
+                    elif row.get("tier_used") == 0:
+                        model_counts["Tier 0 (rules)"] = model_counts.get("Tier 0 (rules)", 0) + 1
+
+                if model_counts:
+                    breakdown_lines = ["\n\n### Model Usage:"]
+                    for m_name, count in sorted(model_counts.items(), key=lambda x: -x[1]):
+                        breakdown_lines.append(f"- {m_name}: {count}")
+                    review_text += "\n".join(breakdown_lines)
+
+                if session_logger is not None and session_id is not None:
+                    try:
+                        session_logger.finish_session(session_id, review_text)
+                    except Exception:
+                        logger.exception("Failed to save session review to SQLite")
+            except Exception:
+                logger.exception("Unexpected error in end-of-session review worker")
+                review_text = _local_summary(logs)
+            finally:
+                if not review_text:
+                    review_text = _local_summary(logs)
+                try:
+                    self.ui.show_review(review_text, on_close=self.shutdown)
+                except Exception:
+                    logger.exception("Failed to show final review screen")
+
+        t = threading.Thread(target=_review_worker, daemon=True, name="session-review")
+        with self._lock:
+            self._review_thread = t
+        t.start()
+
+    def wait_for_review(self, timeout: float = 5.0) -> None:
+        """Wait for background session review thread to finish (for tests)."""
+        with self._lock:
+            t = getattr(self, "_review_thread", None)
+        if t is not None:
+            t.join(timeout=timeout)
 
     def shutdown(self) -> None:
         """Cleanly stop all background threads and close the Tkinter window."""

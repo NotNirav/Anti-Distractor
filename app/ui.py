@@ -386,7 +386,20 @@ class TkinterUI:
             self.root.title("Anti-Distractor — Session Review")
             self.root.geometry("540x440")
             self.root.minsize(480, 360)
-            self.root.attributes("-topmost", False)
+            try:
+                self.root.deiconify()
+                self.root.lift()
+                self.root.attributes("-topmost", True)
+
+                def _clear_topmost() -> None:
+                    try:
+                        self.root.attributes("-topmost", False)
+                    except Exception:
+                        pass
+
+                self.root.after(150, _clear_topmost)
+            except Exception:
+                logger.exception("Failed to restore/raise review window")
 
             frame = ttk.Frame(self.root, padding="16 16 16 16")
             frame.pack(fill="both", expand=True)

@@ -198,8 +198,115 @@ def test_main_wiring_start_verdict_tick_lockout_and_stop(tmp_path: Path) -> None
     assert controller.watcher.stopped is True
     assert server_handle.should_exit is True
     assert len(cancelled) >= 1
-    assert len(ui.reviews) == 1
-    assert "Study DSA" in ui.reviews[0]
+    assert ui.reviews[0] == "Generating your review..."
+    controller.wait_for_review()
+    assert len(ui.reviews) == 2
+    assert "Study DSA" in ui.reviews[-1]
+
+
+def test_timer_expiry_runs_end_session_and_shows_review(tmp_path: Path) -> None:
+    import time
+
+    ui = FakeUI()
+    scheduled: list[tuple[int, Callable[[], None]]] = []
+    cancelled: list[Any] = []
+    server_handle = FakeServerHandle()
+
+    controller = AppController(
+        ui=ui,
+        timings=DEV_TIMINGS,
+        api_key="fake-key",
+        db_path=str(tmp_path / "test_expiry.db"),
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: server_handle,
+        app_factory=lambda **kwargs: object(),
+        profile_fn=lambda goal, _key: GoalProfile(
+            goal=goal,
+            on_task_topics=["coding"],
+            allowed_domains=[],
+            borderline_domains=[],
+            blocked_domains=[],
+            allowed_apps=[],
+            blocked_apps=[],
+        ),
+        review_fn=lambda goal, mode, logs, _key: f"Review for {goal} ({len(logs)} logs)",
+        schedule_fn=lambda delay_ms, cb: (scheduled.append((delay_ms, cb)) or len(scheduled)),
+        cancel_schedule_fn=lambda h: cancelled.append(h),
+    )
+
+    controller.start()
+    assert ui.setup_cb is not None
+    ui.setup_cb("Timer Test", 1, "gentle")
+    controller.wait_for_startup()
+
+    controller._session_deadline = time.monotonic() - 1.0
+    scheduled[0][1]()
+
+    assert controller.session_active is False
+    assert ui.reviews[0] == "Generating your review..."
+    controller.wait_for_review()
+    assert len(ui.reviews) == 2
+    assert "Timer Test" in ui.reviews[-1]
+
+
+def test_review_timeout_and_exception_fallback(tmp_path: Path, monkeypatch: Any) -> None:
+    import time
+    from app import judge
+
+    class _SlowModels:
+        def generate_content(self, **_kwargs: Any) -> Any:
+            time.sleep(0.5)
+            return type("Resp", (), {"text": "Too late"})()
+
+    class _SlowClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.models = _SlowModels()
+
+    monkeypatch.setattr(judge.genai, "Client", _SlowClient)
+    summary = judge.generate_session_review(
+        goal="Timeout Goal",
+        mode="gentle",
+        logs=[{"on_task": True, "timestamp": 1, "app_or_domain": "code.exe", "title": "main.py"}],
+        api_key="fake-key",
+        timeout_seconds=0.05,
+    )
+    assert "100% on-task across 1 checks" in summary
+
+    ui = FakeUI()
+    controller = AppController(
+        ui=ui,
+        timings=DEV_TIMINGS,
+        api_key="fake-key",
+        db_path=str(tmp_path / "test_exc.db"),
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+        profile_fn=lambda goal, _key: GoalProfile(
+            goal=goal,
+            on_task_topics=[],
+            allowed_domains=[],
+            borderline_domains=[],
+            blocked_domains=[],
+            allowed_apps=[],
+            blocked_apps=[],
+        ),
+        review_fn=lambda *_args: (_ for _ in ()).throw(RuntimeError("boom")),
+        schedule_fn=lambda _delay, _cb: 1,
+        cancel_schedule_fn=lambda _h: None,
+    )
+
+    controller.start()
+    assert ui.setup_cb is not None
+    ui.setup_cb("Fallback Test", 5, "gentle")
+    controller.wait_for_startup()
+    assert ui.end_session_cb is not None
+    ui.end_session_cb()
+    assert ui.reviews[0] == "Generating your review..."
+    controller.wait_for_review()
+    assert len(ui.reviews) == 2
+    assert "Session completed for goal: 'Fallback Test'" in ui.reviews[-1]
 
 
 def test_remember_last_session_json_and_prefill(tmp_path: Path) -> None:

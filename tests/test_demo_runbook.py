@@ -210,8 +210,10 @@ def test_two_minute_demo_script_walkthrough():
         # End session
         controller.end_session()
         assert controller.session_active is False
-        assert len(mock_ui.reviews) == 1
-        assert "Focus Session Review" in mock_ui.reviews[0] or "Session summary" in mock_ui.reviews[0]
+        assert mock_ui.reviews[0] == "Generating your review..."
+        controller.wait_for_review()
+        assert len(mock_ui.reviews) == 2
+        assert "Focus Session Review" in mock_ui.reviews[-1] or "Session summary" in mock_ui.reviews[-1]
 
         # Verify SQLite logs were saved
         logs = controller.logger.get_session_logs(controller._session_id)
@@ -257,3 +259,4 @@ def test_extension_disconnect_resilience():
 
         controller.end_session()
         assert controller.session_active is False
+        controller.wait_for_review()

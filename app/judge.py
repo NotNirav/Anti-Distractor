@@ -805,6 +805,7 @@ def generate_session_review(
     mode: ModeType,
     logs: list[dict[str, Any]],
     api_key: str,
+    timeout_seconds: float = 15.0,
 ) -> str:
     """Summarize the session's text-only SQLite activity logs into a concise user review."""
     total = len(logs)
@@ -841,12 +842,25 @@ Write an engaging, constructive, and concise post-session review for the user:
 - Mention any distractions or drift episodes and how they were handled.
 - Keep the tone encouraging, concise (2-3 short paragraphs or clean markdown bullet points), and actionable.
 """
-    try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=GEMINI_VISION_MODEL,
-            contents=prompt,
-        )
-        return (response.text or "").strip() or fallback_summary
-    except Exception:
+    result_box: list[str] = []
+    done_event = threading.Event()
+
+    def _call_model() -> None:
+        try:
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=GEMINI_VISION_MODEL,
+                contents=prompt,
+            )
+            text = (response.text or "").strip()
+            result_box.append(text or fallback_summary)
+        except Exception:
+            result_box.append(fallback_summary)
+        finally:
+            done_event.set()
+
+    worker = threading.Thread(target=_call_model, daemon=True, name="session-review-genai")
+    worker.start()
+    if not done_event.wait(timeout=max(0.01, timeout_seconds)):
         return fallback_summary
+    return result_box[0] if result_box else fallback_summary
