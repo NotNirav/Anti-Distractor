@@ -8,14 +8,10 @@
 
 ```text
 Anti-Distractor/
-├── AGENTS.md                  # Agent working rules and escalation policy
-├── CONTRACTS.md               # Module boundaries, schemas, API, and config contracts
-├── implementation_plan.md     # Ordered task breakdown with model assignments
-├── PROGRESS.md                # Task checklist, notes, deviations, escalations
-├── plan.md                    # Original project plan
-├── .env.example               # Template for GEMINI_API_KEY and runtime mode
-├── .gitignore                 # Ignore .env, venv, __pycache__, *.db, logs
-├── requirements.txt           # Python dependencies
+├── README.md                  # Project overview, quick start, 2-minute demo script, tests
+├── .env.example               # Template for GEMINI_API_KEY, runtime mode, and model chain
+├── .gitignore                 # Ignore .env, venv, __pycache__, *.db, last_session.json, logs
+├── requirements.txt           # Python dependencies (including pystray & Pillow)
 ├── app/
 │   ├── __init__.py
 │   ├── config.py              # Timing presets (dev/demo), thresholds, server & model settings
@@ -25,16 +21,31 @@ Anti-Distractor/
 │   ├── cache.py               # In-memory VerdictCache with override support
 │   ├── screen.py              # In-memory mss screenshot capture + Pillow downscaling
 │   ├── window_watcher.py      # pywin32 + psutil foreground window tracking & minimize helper
-│   ├── judge.py               # Tier 0 rules/cache, Tier 1 text AI, Tier 2 vision AI, review AI
+│   ├── judge.py               # Tier 0 rules/cache, Tier 1/2 AI failover chain, review AI
 │   ├── server.py              # FastAPI local bridge (/health, /tabs, /commands, /commands/ack)
-│   ├── event_engine.py        # Debounce, dwell, heartbeat, tier escalation, rate-limit fallback
+│   ├── event_engine.py        # Debounce, dwell, heartbeat, pause/snooze, tier escalation
 │   ├── state_machine.py       # Deterministic agent state machine (Normal/Strict, Layer 1/2)
-│   ├── ui.py                  # Tkinter UI (setup, HUD, Layer 1/2 popups, strict overlay, review)
+│   ├── tray.py                # Windows system tray icon manager via pystray & Pillow
+│   ├── ui.py                  # Tkinter UI (Dark/Light, Setup, HUD, Rules Editor, Overlay, Review)
 │   └── main.py                # Application entry point & cross-thread orchestration
-└── extension/
-    ├── manifest.json          # Chrome/Edge Manifest V3 configuration
-    ├── background.js          # Service worker: tab listeners, snapshot POST, command polling
-    └── popup.html             # Minimal status popup for debugging connection/session state
+├── docs/
+│   ├── AGENTS.md              # Agent working rules and escalation policy
+│   ├── CONTRACTS.md           # Module boundaries, schemas, API, and config contracts
+│   ├── PROGRESS.md            # Task checklist, notes, deviations, escalations
+│   ├── REVIEW_FIXES.md        # Early phase review fixes
+│   ├── UI_REVIEW.md           # UI/UX audit findings and resolved upgrade summary
+│   ├── implementation_plan.md # Ordered task breakdown with model assignments
+│   └── plan.md                # Original project plan
+├── extension/
+│   ├── manifest.json          # Chrome/Edge Manifest V3 configuration
+│   ├── background.js          # Service worker: tab listeners, snapshot POST, command polling
+│   ├── popup.html             # Status popup for debugging bridge connection/session state
+│   └── popup.js               # Status popup controller polling GET /health
+├── scripts/
+│   ├── ui_demo.py             # Manual UI walkthrough exercising HUD, popups, rules, overlay
+│   ├── run_image_benchmark.py # 20-screenshot benchmark evaluation harness
+│   └── benchmark_images/      # Benchmark fixtures and benchmark_results.json
+└── tests/                     # 56 unit and integration tests (offline fakes)
 ```
 
 ---
@@ -79,11 +90,16 @@ DEMO_TIMINGS = TimingConfig(
 SERVER_HOST: str = "127.0.0.1"
 SERVER_PORT: int = 8765
 DB_PATH: str = "anti_distractor.db"
-GEMINI_TEXT_MODEL: str = "gemini-2.5-flash-lite"   # Verify in AI Studio during Phase 0
-GEMINI_VISION_MODEL: str = "gemini-2.5-flash"       # Verify in AI Studio during Phase 0
+MODEL_PREFERENCE_1: str = os.getenv("MODEL_PREFERENCE_1", "gemini-3.5-flash-lite")
+MODEL_PREFERENCE_2: str = os.getenv("MODEL_PREFERENCE_2", "gemma-4-31b-it")
+MODEL_PREFERENCE_3: str = os.getenv("MODEL_PREFERENCE_3", "gemma-4-26b-a4b-it")
+MODEL_PREFERENCES: list[str] = [MODEL_PREFERENCE_1, MODEL_PREFERENCE_2, MODEL_PREFERENCE_3]
+GEMINI_TEXT_MODEL: str = MODEL_PREFERENCE_1
+GEMINI_VISION_MODEL: str = MODEL_PREFERENCE_1
 SCREENSHOT_MAX_WIDTH: int = 1024
 PUNISH_CONFIDENCE_THRESHOLD: float = 0.60           # Below this -> treat as on_task
 TIER1_ESCALATION_CONFIDENCE: float = 0.75           # Below this in Tier 1 -> escalate to Tier 2
+VISION_MIN_INTERVAL_SECONDS: int = 60
 ```
 
 ---
@@ -145,12 +161,12 @@ class ActivityContext:
 class GoalProfile:
     """Expanded semantic profile for the user's session goal."""
     goal: str
-    on_task_topics: list[str]
-    allowed_domains: list[str]
-    borderline_domains: list[str]
-    blocked_domains: list[str]
-    allowed_apps: list[str]
-    blocked_apps: list[str]
+    on_task_topics: list[str] = field(default_factory=list)
+    allowed_domains: list[str] = field(default_factory=list)
+    borderline_domains: list[str] = field(default_factory=list)
+    blocked_domains: list[str] = field(default_factory=list)
+    allowed_apps: list[str] = field(default_factory=list)
+    blocked_apps: list[str] = field(default_factory=list)
 
 @dataclass
 class JudgeVerdict:
@@ -163,6 +179,7 @@ class JudgeVerdict:
     tier_used: int         # 0, 1, or 2
     from_cache: bool = False
     rate_limited: bool = False
+    model_used: str = ""
 
 @dataclass
 class AgentDecision:
@@ -267,7 +284,7 @@ def generate_session_review(goal: str, mode: ModeType, logs: list[dict[str, Any]
 ### Event Engine (`app/event_engine.py`)
 ```python
 class EventEngine:
-    """Coordinates triggers, debouncing, borderline dwell checks, heartbeat, and judge calls."""
+    """Coordinates triggers, debouncing, borderline dwell checks, heartbeat, pause/snooze, and judge calls."""
     def __init__(
         self,
         goal: str,
@@ -278,6 +295,17 @@ class EventEngine:
         api_key: str,
         on_verdict: Callable[[ActivityContext, JudgeVerdict], None],
     ) -> None: ...
+    @property
+    def is_running(self) -> bool: ...
+    @property
+    def is_paused(self) -> bool: ...
+    def pause_remaining_seconds(self) -> float: ...
+    def pause(self, duration_seconds: float = 300.0) -> None:
+        """Pause evaluations for duration_seconds (e.g. intentional 5-minute break)."""
+    def resume(self) -> None:
+        """Resume monitoring immediately after a pause."""
+    def update_profile(self, profile: GoalProfile) -> None:
+        """Replace the active GoalProfile live without restarting the session."""
     def start(self) -> None:
         """Start timers (heartbeat, dwell monitor, debounce worker) and trigger baseline check."""
     def stop(self) -> None:
@@ -337,18 +365,68 @@ class SessionLogger:
         """Fetch all activity log rows for a session ordered by timestamp."""
 ```
 
+### System Tray (`app/tray.py`)
+```python
+def create_tray_icon_image(color_hex: str = "#16A34A", size: int = 64) -> Image.Image:
+    """Render a crisp 64x64 rounded target badge in memory for the Windows tray."""
+
+class SystemTrayManager:
+    """Manages an optional Windows system tray icon when the HUD is minimized to tray."""
+    def __init__(
+        self,
+        on_restore: Callable[[], None],
+        on_toggle_pause: Callable[[], None] | None = None,
+        on_end_session: Callable[[], None] | None = None,
+        on_quit: Callable[[], None] | None = None,
+        icon_factory: Callable[..., Any] | None = None,
+    ) -> None: ...
+    @staticmethod
+    def is_available() -> bool: ...
+    def start(self, tooltip: str = "Anti-Distractor", state: str = "ON_TASK") -> bool: ...
+    def update_state(self, state: str, paused: bool = False, tooltip: str | None = None) -> None: ...
+    def stop(self) -> None: ...
+```
+
 ### UI Hooks (`app/ui.py`)
 ```python
+ThemeType = Literal["light", "dark"]
+
 class UIHooks(Protocol):
     """Thread-safe interface used by the app controller to drive Tkinter screens."""
-    def show_setup(self, on_start: Callable[[str, int, ModeType], None]) -> None: ...
-    def show_monitoring_hud(self, goal: str, mode: ModeType, on_end_session: Callable[[], None]) -> None: ...
+    def show_setup(
+        self,
+        on_start: Callable[[str, int, ModeType], None],
+        initial_goal: str | None = None,
+        initial_duration: int | None = None,
+        initial_mode: ModeType | None = None,
+        on_edit_rules: Callable[[str], None] | None = None,
+    ) -> None: ...
+    def show_monitoring_hud(
+        self,
+        goal: str,
+        mode: ModeType,
+        on_end_session: Callable[[], None],
+        duration_minutes: int | None = None,
+        on_toggle_pause: Callable[[], None] | None = None,
+        on_open_rules: Callable[[], None] | None = None,
+        on_quit: Callable[[], None] | None = None,
+    ) -> None: ...
     def update_hud_status(self, state: AgentStateName, summary: str) -> None: ...
+    def update_extension_status(self, connected: bool) -> None: ...
+    def update_pause_status(self, paused: bool, remaining_seconds: float = 0.0) -> None: ...
+    def show_rules_editor(self, profile: GoalProfile, on_save: Callable[[GoalProfile], None]) -> None: ...
     def show_layer1_popup(self, goal: str, reason: str, on_choice: Callable[[Literal["back_to_work", "relevant"]], None]) -> None: ...
     def show_layer2_warning(self, goal: str, reason: str) -> None: ...
     def show_strict_overlay(self, goal: str, reason: str, lockout_seconds: float, on_lockout_done: Callable[[], None]) -> None: ...
     def hide_popups_and_overlay(self) -> None: ...
-    def show_review(self, review_text: str, on_close: Callable[[], None]) -> None: ...
+    def show_tier0_shift_popup(self, message: str) -> None: ...
+    def update_ai_calls(self, t1_count: int, t2_count: int) -> None: ...
+    def show_review(
+        self,
+        review_text: str,
+        on_close: Callable[[], None],
+        on_new_session: Callable[[], None] | None = None,
+    ) -> None: ...
 ```
 
 ---
@@ -450,6 +528,9 @@ Local server listens on `http://127.0.0.1:8765` (CORS enabled for `chrome-extens
    - Request JSON: `{"command_id": "cmd-1234", "closed_tab_ids": [42], "errors": []}`
    - Response `200`: `{"ok": true}`
 
+### Extension Liveness Heartbeat (`TabSnapshotStore`)
+`POST /tabs` (via `TabSnapshotStore.update()`), `GET /commands`, and `POST /commands/ack` call `TabSnapshotStore.mark_extension_seen()`. `AppController` polls `TabSnapshotStore.is_extension_connected(stale_seconds=8.0) -> bool` on every tick to update the HUD's `Ext: Live` / `Ext: Off` indicator.
+
 ### Close-Tab Command Flow
 1. Strict mode in `AgentStateMachine` queues a `close_tabs` command in `CommandQueue` with `tab_ids` (from `JudgeVerdict.tabs_to_close`, or the active off-task browser tab if `tabs_to_close` is empty).
 2. `background.js` polls `GET /commands`, receives pending command(s), calls `chrome.tabs.remove(tab_ids)` (ignoring already-closed tab errors), and POSTs result to `POST /commands/ack`.
@@ -486,6 +567,9 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     reason TEXT NOT NULL,
     action_taken TEXT NOT NULL,
     user_override INTEGER NOT NULL DEFAULT 0,
+    model_used TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 ```
+
+`SessionLogger.init_db()` also runs `ALTER TABLE activity_logs ADD COLUMN model_used TEXT DEFAULT ''` in a `try/except` block to migrate older `.db` files automatically.

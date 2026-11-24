@@ -18,6 +18,25 @@ class FakeUI:
         self.hud_updates: list[tuple[AgentStateName, str]] = []
         self.reviews: list[str] = []
         self.last_initial: tuple[Any, Any, Any] | None = None
+        self.ext_statuses: list[bool] = []
+        self.pause_updates: list[tuple[bool, float]] = []
+        self.theme: str = "light"
+        self.on_theme_changed: Callable[[str], None] | None = None
+        self.rules_opened_for: list[GoalProfile] = []
+        self.rules_save_cb: Callable[[GoalProfile], None] | None = None
+
+    def set_theme(self, theme: str) -> None:
+        self.theme = theme
+
+    def update_extension_status(self, connected: bool) -> None:
+        self.ext_statuses.append(connected)
+
+    def update_pause_status(self, paused: bool, remaining_seconds: float = 0.0) -> None:
+        self.pause_updates.append((paused, remaining_seconds))
+
+    def show_rules_editor(self, profile: GoalProfile, on_save: Callable[[GoalProfile], None]) -> None:
+        self.rules_opened_for.append(profile)
+        self.rules_save_cb = on_save
 
     def show_setup(
         self,
@@ -25,6 +44,7 @@ class FakeUI:
         initial_goal: str | None = None,
         initial_duration: int | None = None,
         initial_mode: ModeType | None = None,
+        on_edit_rules: Callable[[str], None] | None = None,
     ) -> None:
         self.setup_cb = on_start
         self.last_initial = (initial_goal, initial_duration, initial_mode)
@@ -68,8 +88,11 @@ class FakeUI:
 class FakeEngine:
     def __init__(self, **kwargs: Any) -> None:
         self.on_verdict = kwargs["on_verdict"]
+        self.profile = kwargs.get("profile")
         self.started = False
         self.stopped = False
+        self.paused_calls: list[float] = []
+        self.resumed_calls: int = 0
         self.immediate_checks: list[tuple[str, bool]] = []
         self.triggers: list[str] = []
 
@@ -78,6 +101,15 @@ class FakeEngine:
 
     def stop(self) -> None:
         self.stopped = True
+
+    def pause(self, duration_seconds: float = 300.0) -> None:
+        self.paused_calls.append(duration_seconds)
+
+    def resume(self) -> None:
+        self.resumed_calls += 1
+
+    def update_profile(self, profile: GoalProfile) -> None:
+        self.profile = profile
 
     def submit_trigger(self, trigger_type: str) -> None:
         self.triggers.append(trigger_type)
@@ -357,3 +389,203 @@ def test_remember_last_session_json_and_prefill(tmp_path: Path) -> None:
     )
     controller3.start()
     assert ui3.last_initial == (None, None, None)
+
+
+def test_self_window_ignored_at_tier0_and_restart_to_setup(tmp_path: Path) -> None:
+    """Verify Anti-Distractor's own window passes at Tier 0 and restart_to_setup works cleanly."""
+    import os
+    from app.cache import VerdictCache
+    from app.judge import tier0_evaluate
+    from app.models import WindowInfo
+
+    profile = GoalProfile(
+        goal="Study DSA",
+        on_task_topics=["algorithms"],
+        allowed_domains=["leetcode.com"],
+        borderline_domains=[],
+        blocked_domains=["instagram.com"],
+        allowed_apps=["code.exe"],
+        blocked_apps=[],
+    )
+    own_win = WindowInfo(
+        hwnd=9999,
+        title="Anti-Distractor — HUD",
+        process_name="python.exe",
+        pid=os.getpid(),
+        is_browser=False,
+    )
+    ctx = ActivityContext(
+        trigger_type="baseline",
+        goal="Study DSA",
+        foreground_window=own_win,
+        tab_snapshot=None,
+        open_windows=[],
+        source_key="python.exe",
+        display_title="Anti-Distractor — HUD",
+    )
+    verdict = tier0_evaluate(ctx, profile, VerdictCache())
+    assert verdict is not None
+    assert verdict.on_task is True
+    assert verdict.tier_used == 0
+
+    # Verify restart_to_setup stops session and re-opens setup with saved settings
+    ui = FakeUI()
+    controller = AppController(
+        ui=ui,
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(tmp_path / "restart.db"),
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+        profile_fn=lambda goal, _key: profile,
+        review_fn=lambda goal, mode, logs, _key: "Review ok",
+        schedule_fn=lambda _delay, _cb: 1,
+        cancel_schedule_fn=lambda _h: None,
+    )
+    controller.start()
+    controller.start_session("Study DSA", 30, "strict")
+    controller.wait_for_startup()
+    assert controller.session_active is True
+
+    controller.restart_to_setup()
+    assert controller.session_active is False
+    assert ui.last_initial == ("Study DSA", 30, "strict")
+
+
+def test_extension_connected_pause_resume_rules_and_theme_persistence(tmp_path: Path) -> None:
+    """Verify TabSnapshotStore liveness, pause/resume deadline extension, live rules save, and theme."""
+    import json
+    import time
+    from fastapi.testclient import TestClient
+    from app.server import CommandQueue, TabSnapshotStore, create_app
+
+    store = TabSnapshotStore()
+    queue = CommandQueue()
+    assert store.is_extension_connected(stale_seconds=5.0) is False
+
+    fastapi_app = create_app(store, queue)
+    client = TestClient(fastapi_app)
+    resp = client.get("/commands")
+    assert resp.status_code == 200
+    assert store.is_extension_connected(stale_seconds=5.0) is True
+    assert store.is_extension_connected(stale_seconds=-1.0) is False
+
+    ui = FakeUI()
+    db_file = tmp_path / "features.db"
+    controller = AppController(
+        ui=ui,
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(db_file),
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+        profile_fn=lambda goal, _key: GoalProfile(
+            goal=goal,
+            on_task_topics=["algo"],
+            allowed_domains=["leetcode.com"],
+            borderline_domains=["youtube.com"],
+            blocked_domains=["instagram.com"],
+            allowed_apps=["code.exe"],
+            blocked_apps=["spotify.exe"],
+        ),
+        review_fn=lambda goal, mode, logs, _key: "Review ok",
+        schedule_fn=lambda _delay, _cb: 1,
+        cancel_schedule_fn=lambda _h: None,
+    )
+
+    controller.start()
+    assert ui.on_theme_changed is not None
+    ui.on_theme_changed("dark")
+    saved_data = json.loads((tmp_path / "last_session.json").read_text(encoding="utf-8"))
+    assert saved_data["theme"] == "dark"
+
+    # Re-create controller -> loads saved dark theme automatically
+    ui2 = FakeUI()
+    controller2 = AppController(
+        ui=ui2,
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(db_file),
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+        profile_fn=lambda goal, _key: GoalProfile(
+            goal=goal,
+            on_task_topics=["algo"],
+            allowed_domains=["leetcode.com"],
+            borderline_domains=["youtube.com"],
+            blocked_domains=["instagram.com"],
+            allowed_apps=["code.exe"],
+            blocked_apps=["spotify.exe"],
+        ),
+        review_fn=lambda goal, mode, logs, _key: "Review ok",
+        schedule_fn=lambda _delay, _cb: 1,
+        cancel_schedule_fn=lambda _h: None,
+    )
+    controller2.start()
+    assert ui2.theme == "dark"
+
+    controller2.start_session("Study DSA", 25, "strict")
+    controller2.wait_for_startup()
+
+    # Extension status tick update
+    assert controller2.tab_store is not None
+    controller2.tab_store.mark_extension_seen()
+    controller2._on_tick()
+    assert ui2.ext_statuses[-1] is True
+
+    # Pause & Resume shifts session deadline forward
+    orig_deadline = controller2._session_deadline
+    assert orig_deadline is not None
+    controller2.pause_session(300.0)
+    assert controller2.engine.paused_calls == [300.0]
+    assert ui2.pause_updates[-1][0] is True
+    time.sleep(0.03)
+    controller2.resume_session()
+    assert controller2.engine.resumed_calls == 1
+    assert ui2.pause_updates[-1][0] is False
+    assert controller2._session_deadline >= orig_deadline
+
+    # Live rules editor opens and saves into engine + clears cache
+    controller2.cache.record_override("youtube.com", "Random video")
+    controller2.open_rules_editor()
+    assert len(ui2.rules_opened_for) == 1
+    assert ui2.rules_save_cb is not None
+    edited = GoalProfile(
+        goal="Study DSA",
+        on_task_topics=["algo"],
+        allowed_domains=["leetcode.com", "coursera.org"],
+        borderline_domains=["youtube.com"],
+        blocked_domains=["instagram.com", "reddit.com"],
+        allowed_apps=["code.exe"],
+        blocked_apps=["spotify.exe"],
+    )
+    ui2.rules_save_cb(edited)
+    assert controller2.engine.profile.allowed_domains == ["leetcode.com", "coursera.org"]
+    assert controller2.cache.get("youtube.com", "Random video") is None
+
+    # Pre-session Setup "Edit Rules" saves draft profile and feeds into next start_session
+    controller2.restart_to_setup()
+    controller2.open_setup_rules_editor("Study DSA")
+    assert len(ui2.rules_opened_for) == 2
+    draft = GoalProfile(
+        goal="Study DSA",
+        on_task_topics=["algo"],
+        allowed_domains=["cp-algorithms.com"],
+        borderline_domains=["youtube.com"],
+        blocked_domains=["tiktok.com"],
+        allowed_apps=["code.exe"],
+        blocked_apps=["discord.exe"],
+    )
+    ui2.rules_save_cb(draft)
+    controller2.start_session("Study DSA", 25, "strict")
+    controller2.wait_for_startup()
+    assert controller2.engine.profile.allowed_domains == ["cp-algorithms.com"]
+    assert controller2.engine.profile.blocked_apps == ["discord.exe"]
+
+    controller2.shutdown()

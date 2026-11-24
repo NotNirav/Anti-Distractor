@@ -79,6 +79,7 @@ class EventEngine:
         self._next_heartbeat_at: float | None = None
         self._dwell_deadline: float | None = None
         self._backoff_until: float = 0.0
+        self._paused_until: float | None = None
 
     def _now(self) -> float:
         if self._clock_fn is not None:
@@ -89,6 +90,48 @@ class EventEngine:
     def is_running(self) -> bool:
         with self._lock:
             return self._running
+
+    @property
+    def is_paused(self) -> bool:
+        with self._lock:
+            return self._paused_until is not None and self._now() < self._paused_until
+
+    def pause_remaining_seconds(self) -> float:
+        """Return remaining pause seconds, or 0.0 if not currently paused."""
+        with self._lock:
+            if self._paused_until is None:
+                return 0.0
+            remaining = self._paused_until - self._now()
+            if remaining <= 0.0:
+                self._paused_until = None
+                return 0.0
+            return remaining
+
+    def pause(self, duration_seconds: float = 300.0) -> None:
+        """Pause evaluations for duration_seconds (e.g. intentional 5-minute break)."""
+        dur = max(1.0, float(duration_seconds))
+        with self._lock:
+            self._paused_until = self._now() + dur
+            self._pending_trigger = None
+            self._debounce_deadline = None
+            self._dwell_deadline = None
+            self._immediate_queue.clear()
+            self._cond.notify_all()
+
+    def resume(self) -> None:
+        """Resume monitoring immediately after a pause."""
+        with self._lock:
+            self._paused_until = None
+            if self._running:
+                self._next_heartbeat_at = self._now() + self.timings.heartbeat_seconds
+                self._immediate_queue.append(("manual_recheck", False))
+            self._cond.notify_all()
+
+    def update_profile(self, profile: GoalProfile) -> None:
+        """Replace the active GoalProfile live without restarting the session."""
+        with self._lock:
+            self.profile = profile
+            self._cond.notify_all()
 
     def start(self) -> None:
         """Start timers (heartbeat, dwell monitor, debounce worker) and trigger baseline check."""
@@ -136,6 +179,8 @@ class EventEngine:
             if not self._running:
                 return
             now = self._now()
+            if self._paused_until is not None and now < self._paused_until:
+                return
             self._pending_trigger = trigger_type
             self._debounce_deadline = now + self.timings.debounce_seconds
             # Reset dwell countdown on new activity; it will re-arm after the check if still borderline
@@ -151,6 +196,8 @@ class EventEngine:
         run_sync = False
         with self._lock:
             if self._stopped:
+                return
+            if self._paused_until is not None and self._now() < self._paused_until:
                 return
             if self._running:
                 self._pending_trigger = None
@@ -178,6 +225,17 @@ class EventEngine:
             with self._lock:
                 while self._running:
                     now = self._now()
+
+                    if self._paused_until is not None:
+                        if now < self._paused_until:
+                            wait_s = max(0.0, self._paused_until - now)
+                            if self._clock_fn is not None:
+                                wait_s = min(wait_s, 0.01)
+                            self._cond.wait(timeout=wait_s)
+                            continue
+                        self._paused_until = None
+                        self._next_heartbeat_at = now + self.timings.heartbeat_seconds
+                        self._immediate_queue.append(("manual_recheck", False))
 
                     if self._immediate_queue:
                         task = self._immediate_queue.popleft()

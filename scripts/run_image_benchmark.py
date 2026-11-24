@@ -26,7 +26,7 @@ from app.models import (
     WindowInfo,
 )
 
-BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmark_images"
+BENCHMARK_DIR = Path(__file__).resolve().parent / "benchmark_images"
 BENCHMARK_DIR.mkdir(exist_ok=True)
 
 

@@ -868,6 +868,110 @@ class TestEventEngine(unittest.TestCase):
         finally:
             engine.stop()
 
+    def test_pause_suppresses_triggers_until_resume_or_expiry(self) -> None:
+        win = self._set_active_site("leetcode.com", "Two Sum - LeetCode")
+        clock_lock = threading.Lock()
+        current_time = 200.0
+
+        def fake_clock() -> float:
+            with clock_lock:
+                return current_time
+
+        def advance(seconds: float) -> None:
+            nonlocal current_time
+            with clock_lock:
+                current_time += seconds
+
+        events: list[str] = []
+        cond = threading.Condition()
+
+        def fake_eval(
+            ctx: ActivityContext,
+            profile: GoalProfile,
+            cache: VerdictCache,
+            api_key: str,
+            force_vision: bool = False,
+        ) -> JudgeVerdict:
+            return JudgeVerdict(
+                activity="Working",
+                on_task=True,
+                confidence=1.0,
+                reason="On-task",
+                tabs_to_close=[],
+                tier_used=0,
+            )
+
+        def on_verdict(ctx: ActivityContext, _verdict: JudgeVerdict) -> None:
+            with cond:
+                events.append(ctx.trigger_type)
+                cond.notify_all()
+
+        engine = EventEngine(
+            goal="Study DSA",
+            profile=self.profile,
+            cache=self.cache,
+            tab_store=self.tab_store,
+            timings=TimingConfig(
+                debounce_seconds=1.5,
+                heartbeat_seconds=10.0,
+                dwell_seconds=15.0,
+                grace_period_seconds=5.0,
+                strict_lockout_seconds=8.0,
+                extension_poll_seconds=1.5,
+                window_poll_seconds=0.5,
+            ),
+            api_key="fake-key",
+            on_verdict=on_verdict,
+            get_foreground_fn=lambda: win,
+            list_windows_fn=lambda: [],
+            evaluate_fn=fake_eval,
+            clock_fn=fake_clock,
+        )
+
+        try:
+            engine.start()
+            with cond:
+                self.assertTrue(cond.wait_for(lambda: len(events) == 1, timeout=1.0))
+
+            engine.pause(duration_seconds=300.0)
+            self.assertTrue(engine.is_paused)
+            self.assertGreater(engine.pause_remaining_seconds(), 290.0)
+
+            # Triggers during pause are suppressed even past debounce/heartbeat
+            engine.submit_trigger("tab_activated")
+            advance(100.0)
+            time.sleep(0.05)
+            self.assertEqual(len(events), 1)
+            self.assertTrue(engine.is_paused)
+
+            # Auto-resume when 300s pause expires
+            advance(205.0)
+            with cond:
+                self.assertTrue(cond.wait_for(lambda: len(events) == 2, timeout=1.0))
+            self.assertFalse(engine.is_paused)
+
+            # Manual pause + resume + live update_profile
+            engine.pause(duration_seconds=60.0)
+            self.assertTrue(engine.is_paused)
+            engine.resume()
+            self.assertFalse(engine.is_paused)
+            with cond:
+                self.assertTrue(cond.wait_for(lambda: len(events) == 3, timeout=1.0))
+
+            new_profile = GoalProfile(
+                goal="Study DSA",
+                on_task_topics=["algo"],
+                allowed_domains=["github.com"],
+                borderline_domains=[],
+                blocked_domains=[],
+                allowed_apps=[],
+                blocked_apps=[],
+            )
+            engine.update_profile(new_profile)
+            self.assertEqual(engine.profile.allowed_domains, ["github.com"])
+        finally:
+            engine.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

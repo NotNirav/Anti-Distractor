@@ -20,16 +20,33 @@ logger = logging.getLogger(__name__)
 
 
 class TabSnapshotStore:
-    """Thread-safe holder for the latest browser tab snapshot."""
+    """Thread-safe holder for the latest browser tab snapshot and extension liveness."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._latest: TabSnapshot | None = None
+        self._last_seen_at: float | None = None
 
     def update(self, snapshot: TabSnapshot) -> None:
-        """Replace the current tab snapshot."""
+        """Replace the current tab snapshot and mark the extension as recently seen."""
+        now = time.monotonic()
         with self._lock:
             self._latest = snapshot
+            self._last_seen_at = now
+
+    def mark_extension_seen(self) -> None:
+        """Record that the browser extension contacted the local bridge."""
+        now = time.monotonic()
+        with self._lock:
+            self._last_seen_at = now
+
+    def is_extension_connected(self, stale_seconds: float = 8.0) -> bool:
+        """Return True if the browser extension sent a snapshot or poll within stale_seconds."""
+        now = time.monotonic()
+        with self._lock:
+            if self._last_seen_at is None:
+                return False
+            return (now - self._last_seen_at) <= stale_seconds
 
     def get_latest(self) -> TabSnapshot | None:
         """Return the latest TabSnapshot or None if no extension data has arrived yet."""
@@ -193,10 +210,12 @@ def create_app(
 
     @app.get("/commands")
     def get_commands() -> dict[str, Any]:
+        tab_store.mark_extension_seen()
         return {"commands": command_queue.poll_commands()}
 
     @app.post("/commands/ack")
     def post_commands_ack(payload: CommandAckPayload) -> dict[str, Any]:
+        tab_store.mark_extension_seen()
         command_queue.ack_command(payload.command_id)
         return {"ok": True}
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import tkinter as tk
@@ -128,6 +129,12 @@ class AppController:
         self._ending = False
         self._t1_calls = 0
         self._t2_calls = 0
+        self._paused = False
+        self._pause_started_at: float | None = None
+        self._pause_until: float | None = None
+        self._last_ext_connected: bool | None = None
+        self.profile: GoalProfile | None = None
+        self._draft_profile: GoalProfile | None = None
 
         self.logger: SessionLogger | None = None
         self.tab_store: TabSnapshotStore | None = None
@@ -175,21 +182,43 @@ class AppController:
             logger.exception("Failed to load last_session.json")
         return {}
 
-    def _save_last_session(self, goal: str, duration_minutes: int, mode: ModeType) -> None:
+    def _save_last_session(
+        self,
+        goal: str,
+        duration_minutes: int,
+        mode: ModeType,
+        theme: str | None = None,
+    ) -> None:
         try:
+            existing = self._load_last_session()
             path = self._get_last_session_path()
-            payload = {
+            resolved_theme = theme if theme in ("light", "dark") else existing.get("theme")
+            payload: dict[str, Any] = {
                 "goal": goal,
                 "duration_minutes": duration_minutes,
                 "mode": mode,
             }
+            if resolved_theme in ("light", "dark"):
+                payload["theme"] = resolved_theme
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
         except Exception:
             logger.exception("Failed to save last_session.json")
 
+    def _save_theme_preference(self, theme: str) -> None:
+        if theme not in ("light", "dark"):
+            return
+        try:
+            existing = self._load_last_session()
+            existing["theme"] = theme
+            path = self._get_last_session_path()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(existing, f, indent=2)
+        except Exception:
+            logger.exception("Failed to save theme preference in last_session.json")
+
     def start(self) -> None:
-        """Show the initial setup screen, prefilled with last session if available."""
+        """Show the initial setup screen, prefilled with last session and theme if available."""
         root = getattr(self.ui, "root", None)
         if root is not None and hasattr(root, "protocol"):
             try:
@@ -201,6 +230,18 @@ class AppController:
         init_goal = last_sess.get("goal")
         init_dur = last_sess.get("duration_minutes")
         init_mode = last_sess.get("mode")
+        init_theme = last_sess.get("theme")
+
+        if hasattr(self.ui, "on_theme_changed"):
+            try:
+                self.ui.on_theme_changed = self._save_theme_preference
+            except Exception:
+                pass
+        if init_theme in ("light", "dark") and hasattr(self.ui, "set_theme"):
+            try:
+                self.ui.set_theme(init_theme)
+            except Exception:
+                logger.exception("Failed to apply saved theme")
 
         try:
             self.ui.show_setup(
@@ -208,9 +249,18 @@ class AppController:
                 initial_goal=init_goal,
                 initial_duration=init_dur,
                 initial_mode=init_mode,
+                on_edit_rules=self.open_setup_rules_editor,
             )
         except TypeError:
-            self.ui.show_setup(on_start=self.start_session)
+            try:
+                self.ui.show_setup(
+                    on_start=self.start_session,
+                    initial_goal=init_goal,
+                    initial_duration=init_dur,
+                    initial_mode=init_mode,
+                )
+            except TypeError:
+                self.ui.show_setup(on_start=self.start_session)
 
     def start_session(self, goal: str, duration_minutes: int, mode: ModeType) -> None:
         """Show HUD immediately and initialize session components in a background thread."""
@@ -225,8 +275,36 @@ class AppController:
             self._last_log_id = None
             self._t1_calls = 0
             self._t2_calls = 0
+            self._paused = False
+            self._pause_started_at = None
+            self._pause_until = None
+            self._last_ext_connected = None
 
-        self.ui.show_monitoring_hud(goal, mode, on_end_session=self.end_session)
+        try:
+            self.ui.show_monitoring_hud(
+                goal,
+                mode,
+                on_end_session=self.end_session,
+                duration_minutes=duration_minutes,
+                on_toggle_pause=self.toggle_pause,
+                on_open_rules=self.open_rules_editor,
+                on_quit=self.shutdown,
+            )
+        except TypeError:
+            try:
+                self.ui.show_monitoring_hud(
+                    goal,
+                    mode,
+                    on_end_session=self.end_session,
+                    duration_minutes=duration_minutes,
+                )
+            except TypeError:
+                self.ui.show_monitoring_hud(goal, mode, on_end_session=self.end_session)
+        if hasattr(self.ui, "update_extension_status"):
+            try:
+                self.ui.update_extension_status(False)
+            except Exception:
+                pass
         if hasattr(self.ui, "update_hud_status"):
             try:
                 self.ui.update_hud_status("ON_TASK", "Starting...")
@@ -235,7 +313,21 @@ class AppController:
 
         def _startup_worker() -> None:
             try:
-                if self.fake_judge:
+                with self._lock:
+                    draft = self._draft_profile
+                    self._draft_profile = None
+
+                if draft is not None:
+                    profile = GoalProfile(
+                        goal=goal,
+                        on_task_topics=list(draft.on_task_topics) or [goal.strip()],
+                        allowed_domains=list(draft.allowed_domains),
+                        borderline_domains=list(draft.borderline_domains),
+                        blocked_domains=list(draft.blocked_domains),
+                        allowed_apps=list(draft.allowed_apps),
+                        blocked_apps=list(draft.blocked_apps),
+                    )
+                elif self.fake_judge:
                     profile = fallback_goal_profile(goal)
                 else:
                     try:
@@ -243,6 +335,9 @@ class AppController:
                     except Exception:
                         logger.exception("Goal profile generation failed; using fallback profile")
                         profile = fallback_goal_profile(goal)
+
+                with self._lock:
+                    self.profile = profile
 
                 session_logger = self._session_logger_cls(db_path=self.db_path)
                 session_logger.init_db()
@@ -369,9 +464,12 @@ class AppController:
 
                 with self._lock:
                     if self._ending:
-                        if server_handle is not None and hasattr(server_handle, "stop"):
+                        if server_handle is not None:
                             try:
-                                server_handle.stop()
+                                if hasattr(server_handle, "should_exit"):
+                                    server_handle.should_exit = True
+                                elif hasattr(server_handle, "stop"):
+                                    server_handle.stop()
                             except Exception:
                                 pass
                         return
@@ -387,14 +485,14 @@ class AppController:
                     self.session_active = True
                     self._session_deadline = time.monotonic() + max(1, duration_minutes) * 60.0
 
-                watcher.start()
-                engine.start()
-                engine.run_immediate_check("baseline", force_vision=False)
                 if hasattr(self.ui, "update_hud_status"):
                     try:
                         self.ui.update_hud_status("ON_TASK", "Monitoring active.")
                     except Exception:
                         pass
+                watcher.start()
+                engine.start()
+                engine.run_immediate_check("baseline", force_vision=False)
                 if hasattr(self.ui, "dispatch"):
                     self.ui.dispatch(self._schedule_tick)
                 else:
@@ -434,6 +532,34 @@ class AppController:
                 return
             sm = self.state_machine
             deadline = self._session_deadline
+            tab_store = self.tab_store
+            paused = self._paused
+            pause_until = self._pause_until
+            prev_ext = self._last_ext_connected
+
+        if tab_store is not None and hasattr(tab_store, "is_extension_connected"):
+            try:
+                connected = bool(tab_store.is_extension_connected(stale_seconds=8.0))
+                if connected != prev_ext:
+                    with self._lock:
+                        self._last_ext_connected = connected
+                    if hasattr(self.ui, "update_extension_status"):
+                        self.ui.update_extension_status(connected)
+            except Exception:
+                logger.exception("Error checking extension connectivity")
+
+        if paused:
+            rem = max(0.0, (pause_until or 0.0) - time.monotonic())
+            if rem <= 0.0:
+                self.resume_session()
+            else:
+                if hasattr(self.ui, "update_pause_status"):
+                    try:
+                        self.ui.update_pause_status(True, rem)
+                    except Exception:
+                        pass
+            self._schedule_tick()
+            return
 
         if deadline is not None and time.monotonic() >= deadline:
             self.end_session()
@@ -447,6 +573,126 @@ class AppController:
 
         self._schedule_tick()
 
+    def pause_session(self, duration_seconds: float = 300.0) -> None:
+        """Intentionally pause monitoring for a short break without ending the session."""
+        dur = max(1.0, float(duration_seconds))
+        now = time.monotonic()
+        with self._lock:
+            if not self.session_active or self._ending:
+                return
+            self._paused = True
+            self._pause_started_at = now
+            self._pause_until = now + dur
+            engine = self.engine
+
+        if engine is not None and hasattr(engine, "pause"):
+            try:
+                engine.pause(dur)
+            except Exception:
+                logger.exception("Failed to pause EventEngine")
+
+        if hasattr(self.ui, "hide_popups_and_overlay"):
+            try:
+                self.ui.hide_popups_and_overlay()
+            except Exception:
+                pass
+        if hasattr(self.ui, "update_pause_status"):
+            try:
+                self.ui.update_pause_status(True, dur)
+            except Exception:
+                logger.exception("Failed to update HUD pause status")
+
+    def resume_session(self) -> None:
+        """Resume monitoring after a break, shifting deadline forward by the paused duration."""
+        now = time.monotonic()
+        with self._lock:
+            if not self._paused:
+                return
+            elapsed = max(0.0, now - (self._pause_started_at or now))
+            if self._session_deadline is not None:
+                self._session_deadline += elapsed
+            self._paused = False
+            self._pause_started_at = None
+            self._pause_until = None
+            engine = self.engine
+            active = self.session_active and not self._ending
+
+        if engine is not None and hasattr(engine, "resume"):
+            try:
+                engine.resume()
+            except Exception:
+                logger.exception("Failed to resume EventEngine")
+
+        if hasattr(self.ui, "update_pause_status"):
+            try:
+                self.ui.update_pause_status(False, 0.0)
+            except Exception:
+                pass
+        if active and hasattr(self.ui, "update_hud_status"):
+            try:
+                self.ui.update_hud_status("ON_TASK", "Monitoring resumed.")
+            except Exception:
+                pass
+
+    def toggle_pause(self, duration_seconds: float = 300.0) -> None:
+        """Toggle between active monitoring and a 5-minute break."""
+        with self._lock:
+            currently_paused = self._paused
+        if currently_paused:
+            self.resume_session()
+        else:
+            self.pause_session(duration_seconds=duration_seconds)
+
+    def update_goal_profile(self, new_profile: GoalProfile) -> None:
+        """Apply edited allow/block rules live to the active engine and clear cached verdicts."""
+        with self._lock:
+            self.profile = new_profile
+            engine = self.engine
+            cache = self.cache
+
+        if cache is not None:
+            try:
+                cache.clear()
+            except Exception:
+                logger.exception("Failed clearing VerdictCache after profile update")
+        if engine is not None and hasattr(engine, "update_profile"):
+            try:
+                engine.update_profile(new_profile)
+            except Exception:
+                logger.exception("Failed updating EventEngine profile")
+        if hasattr(self.ui, "update_hud_status"):
+            try:
+                self.ui.update_hud_status("ON_TASK", "Rules updated.")
+            except Exception:
+                pass
+
+    def _save_draft_profile(self, draft: GoalProfile) -> None:
+        with self._lock:
+            self._draft_profile = draft
+
+    def open_setup_rules_editor(self, goal_text: str = "") -> None:
+        """Open the rules editor before starting a session (prefilled from draft or defaults)."""
+        clean_goal = (goal_text or "").strip() or "Focus"
+        with self._lock:
+            draft = self._draft_profile
+        if draft is None or draft.goal != clean_goal:
+            draft = fallback_goal_profile(clean_goal)
+        if hasattr(self.ui, "show_rules_editor"):
+            try:
+                self.ui.show_rules_editor(draft, on_save=self._save_draft_profile)
+            except Exception:
+                logger.exception("Failed to open setup rules editor")
+
+    def open_rules_editor(self) -> None:
+        """Open the live editable domain/app rules dialog for the current session."""
+        with self._lock:
+            profile = self.profile or fallback_goal_profile(self.current_goal or "Focus")
+        if hasattr(self.ui, "show_rules_editor"):
+            try:
+                self.ui.show_rules_editor(profile, on_save=self.update_goal_profile)
+            except Exception:
+                logger.exception("Failed to open rules editor")
+
     def _stop_background_services(self) -> None:
         with self._lock:
             tick_handle = self._tick_handle
@@ -455,6 +701,10 @@ class AppController:
             watcher = self.watcher
             server = self.server_handle
             self.session_active = False
+            self._paused = False
+            self._pause_started_at = None
+            self._pause_until = None
+            self._last_ext_connected = None
 
         self._cancel_schedule(tick_handle)
 
@@ -476,10 +726,32 @@ class AppController:
             except Exception:
                 logger.exception("Error stopping uvicorn server")
 
+    def _show_review_screen(self, review_text: str) -> None:
+        try:
+            self.ui.show_review(
+                review_text,
+                on_close=self.shutdown,
+                on_new_session=self.restart_to_setup,
+            )
+        except TypeError:
+            self.ui.show_review(review_text, on_close=self.shutdown)
+
+    def restart_to_setup(self) -> None:
+        """Stop any active services and return cleanly to the Setup screen for a new session."""
+        self._stop_background_services()
+        with self._lock:
+            self._ending = False
+            self._starting = False
+            self._session_deadline = None
+            self.session_active = False
+            self.profile = None
+        self.start()
+
     def end_session(self) -> None:
         """Stop monitoring, show review screen immediately, and generate review off the UI thread."""
         with self._lock:
-            if self._ending or not self.session_active:
+            was_starting = bool(getattr(self, "_starting", False))
+            if self._ending or (not self.session_active and not was_starting):
                 return
             self._ending = True
             sm = self.state_machine
@@ -501,7 +773,7 @@ class AppController:
                 logger.exception("Error ending state machine")
 
         try:
-            self.ui.show_review("Generating your review...", on_close=self.shutdown)
+            self._show_review_screen("Generating your review...")
         except Exception:
             logger.exception("Failed to show initial review screen")
 
@@ -570,7 +842,7 @@ class AppController:
                 if not review_text:
                     review_text = _local_summary(logs)
                 try:
-                    self.ui.show_review(review_text, on_close=self.shutdown)
+                    self._show_review_screen(review_text)
                 except Exception:
                     logger.exception("Failed to show final review screen")
 
@@ -596,6 +868,12 @@ class AppController:
                 sm.end_session()
             except Exception:
                 pass
+        if hasattr(self.ui, "close"):
+            try:
+                self.ui.close()
+                return
+            except Exception:
+                logger.exception("Failed to close UI cleanly")
         root = getattr(self.ui, "root", None)
         if root is not None:
             try:
@@ -611,6 +889,17 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
 
     timings = get_timings()
     api_key = get_gemini_api_key()

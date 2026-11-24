@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Callable
@@ -301,6 +302,23 @@ def tier0_evaluate(
     cache: VerdictCache,
 ) -> JudgeVerdict | None:
     """Evaluate using verdict cache and goal-profile allow/block lists; return None if ambiguous."""
+    # 0. Never penalize or spend AI tokens evaluating Anti-Distractor's own windows
+    if (
+        ctx.foreground_window is not None
+        and ctx.foreground_window.pid == os.getpid()
+        and "anti-distractor" in (ctx.foreground_window.title or "").lower()
+    ):
+        return JudgeVerdict(
+            activity="Using Anti-Distractor",
+            on_task=True,
+            confidence=1.0,
+            reason="Anti-Distractor focus window.",
+            tabs_to_close=[],
+            tier_used=0,
+            from_cache=False,
+            rate_limited=False,
+        )
+
     # 1. First, check in-memory VerdictCache (handles repeat visits and user overrides)
     cached = cache.get(ctx.source_key, ctx.display_title)
     if cached is not None:

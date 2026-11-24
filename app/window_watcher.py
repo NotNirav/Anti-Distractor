@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import threading
 from typing import Callable
 
@@ -15,6 +16,7 @@ import win32process
 from app.models import WindowInfo
 
 logger = logging.getLogger(__name__)
+_SELF_PID = os.getpid()
 
 BROWSER_PROCESSES: set[str] = {
     "chrome.exe",
@@ -117,6 +119,8 @@ def list_open_window_titles(limit: int = 15) -> list[str]:
                 title = win32gui.GetWindowText(hwnd).strip()
                 if title and title not in ("Program Manager", "Windows Shell Experience Host"):
                     _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if pid == _SELF_PID:
+                        return True
                     proc_name = _get_process_name(pid)
                     entry = f"{title} ({proc_name})" if proc_name else title
                     if entry not in windows:
@@ -140,6 +144,9 @@ def minimize_window(hwnd: int) -> bool:
     _ensure_default_desktop()
     try:
         if win32gui.IsWindow(hwnd):
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            if pid == _SELF_PID:
+                return False
             win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
             return True
         return False
@@ -184,6 +191,11 @@ class WindowWatcher:
             try:
                 info = get_foreground_window()
                 if info is not None:
+                    # Ignore Anti-Distractor's own windows so dragging the HUD or
+                    # answering popups never triggers a spurious off-task check.
+                    if info.pid == _SELF_PID:
+                        self._stop_event.wait(timeout=self.poll_interval)
+                        continue
                     if info.hwnd != self._last_hwnd or info.title != self._last_title:
                         self._last_hwnd = info.hwnd
                         self._last_title = info.title
