@@ -23,6 +23,7 @@ from app.theme import (
     StatusPill,
     SurfaceCard,
     mono_font,
+    tk_ui_font,
     ui_font,
 )
 from app.win32_ui import (
@@ -130,7 +131,7 @@ class ToolTip:
             lbl = tk.Label(
                 tip,
                 text=msg,
-                font=ui_font(10),
+                font=tk_ui_font(9),
                 bg="#09090B",
                 fg="#FAFAFA",
                 padx=10,
@@ -593,7 +594,7 @@ class HistoryAnalyticsDialog:
         lb = tk.Listbox(
             lb_wrap,
             height=8,
-            font=ui_font(10),
+            font=tk_ui_font(9),
             bg=palette["surface_alt"],
             fg=palette["text"],
             selectbackground=palette["primary"],

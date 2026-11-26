@@ -27,6 +27,7 @@ DESIGN BRIEF
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import sys
 import tkinter as tk
@@ -252,29 +253,83 @@ def _resolve_font_families(root: tk.Misc | None = None) -> tuple[str, str, str]:
     return display, body, mono
 
 
+_DPI_SCALE: float | None = None
+
+
+def _get_dpi_scale() -> float:
+    """Return the system DPI scale factor relative to 96 DPI (clamped 1.0..2.5)."""
+    global _DPI_SCALE
+    if _DPI_SCALE is not None:
+        return _DPI_SCALE
+    scale = 1.0
+    if sys.platform == "win32":
+        try:
+            dpi = int(ctypes.windll.user32.GetDpiForSystem())
+            if dpi > 0:
+                scale = max(1.0, min(2.5, dpi / 96.0))
+        except Exception:
+            scale = 1.0
+    _DPI_SCALE = scale
+    return scale
+
+
+def _ctk_px(size: int) -> int:
+    """Convert a nominal UI size to DPI-compensated pixel size for CustomTkinter."""
+    # CTk converts positive font tuple integers into negative pixel sizes when
+    # widget scaling is 1.0; compensate so text matches standard Windows pt sizing.
+    return max(size, int(round(size * 1.15 * _get_dpi_scale())))
+
+
 def ui_font(
     size: int,
     weight: Literal["normal", "bold"] = "normal",
     *,
     display: bool = False,
 ) -> tuple[str, int] | tuple[str, int, str]:
-    """Return a crisp UI font tuple using Inter -> Segoe UI Variable -> Segoe UI."""
+    """Return a crisp UI font tuple for CTk widgets (DPI-compensated px)."""
     disp_fam, body_fam, _ = _resolve_font_families()
     fam = disp_fam if display else body_fam
+    px = _ctk_px(size)
     if weight == "bold":
-        return (fam, size, "bold")
-    return (fam, size)
+        return (fam, px, "bold")
+    return (fam, px)
 
 
 def mono_font(
     size: int,
     weight: Literal["normal", "bold"] = "normal",
 ) -> tuple[str, int] | tuple[str, int, str]:
-    """Return a crisp monospace font tuple using Cascadia Mono -> Consolas."""
+    """Return a crisp monospace font tuple for CTk widgets (DPI-compensated px)."""
+    _, _, mono_fam = _resolve_font_families()
+    px = _ctk_px(size)
+    if weight == "bold":
+        return (mono_fam, px, "bold")
+    return (mono_fam, px)
+
+
+def tk_ui_font(
+    pt_size: int,
+    weight: Literal["normal", "bold"] = "normal",
+    *,
+    display: bool = False,
+) -> tuple[str, int] | tuple[str, int, str]:
+    """Return a native Tk point-size UI font tuple for plain tk widgets."""
+    disp_fam, body_fam, _ = _resolve_font_families()
+    fam = disp_fam if display else body_fam
+    if weight == "bold":
+        return (fam, pt_size, "bold")
+    return (fam, pt_size)
+
+
+def tk_mono_font(
+    pt_size: int,
+    weight: Literal["normal", "bold"] = "normal",
+) -> tuple[str, int] | tuple[str, int, str]:
+    """Return a native Tk point-size monospace font tuple for plain tk widgets."""
     _, _, mono_fam = _resolve_font_families()
     if weight == "bold":
-        return (mono_fam, size, "bold")
-    return (mono_fam, size)
+        return (mono_fam, pt_size, "bold")
+    return (mono_fam, pt_size)
 
 
 def resolve_variant_colors(
@@ -326,9 +381,10 @@ class ModernButton(ctk.CTkButton):
 
         bg, hover_bg, fg, bd_color, bd_w = resolve_variant_colors(variant, pal)
         font_tuple = font if font is not None else ui_font(12, "bold")
-        approx_char_px = max(7, int((font_tuple[1] if isinstance(font_tuple, tuple) else 12) * 0.58))
-        calc_w = width if width > 0 else max(36, len(text) * approx_char_px + padx * 2)
-        calc_h = height if height > 0 else max(24, (font_tuple[1] if isinstance(font_tuple, tuple) else 12) + pady * 2 + 2)
+        font_px = font_tuple[1] if isinstance(font_tuple, tuple) and len(font_tuple) >= 2 else _ctk_px(12)
+        approx_char_px = max(8, int(font_px * 0.60))
+        calc_w = max(width, font_px + padx * 2) if width > 0 else max(38, len(text) * approx_char_px + padx * 2)
+        calc_h = max(height, font_px + pady * 2 + 4)
 
         super().__init__(
             master,
@@ -491,8 +547,8 @@ class StatusPill(ctk.CTkFrame):
                 font=ui_font(9),
                 text_color=dot_color,
                 fg_color="transparent",
-                width=10,
-                height=14,
+                width=0,
+                height=0,
             )
             self._dot_lbl.pack(side="left", padx=(padx, 2), pady=pady)
             text_pad = (2, padx)
@@ -505,7 +561,7 @@ class StatusPill(ctk.CTkFrame):
             font=font or ui_font(10, "bold"),
             text_color=fg,
             fg_color="transparent",
-            height=14,
+            height=0,
         )
         self._text_lbl.pack(side="left", padx=text_pad, pady=pady)
 
@@ -555,16 +611,18 @@ class ModernEntry(ctk.CTkEntry):
         **kwargs: Any,
     ) -> None:
         pal = palette or PALETTE
+        font_tuple = font or ui_font(12)
+        font_px = font_tuple[1] if isinstance(font_tuple, tuple) and len(font_tuple) >= 2 else _ctk_px(12)
         super().__init__(
             master,
             fg_color=pal["surface_alt"],
             border_color=pal["border_strong"],
             border_width=1,
             corner_radius=corner_radius,
-            height=height,
+            height=max(height, font_px + 18),
             text_color=pal["text"],
             placeholder_text_color=pal["text_muted"],
-            font=font or ui_font(12),
+            font=font_tuple,
             **kwargs,
         )
         self._pal = pal

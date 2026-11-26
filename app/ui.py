@@ -51,6 +51,8 @@ from app.theme import (
     mono_font,
     resolve_variant_colors as _resolve_variant_colors,
     set_button_variant as _set_button_variant,
+    tk_mono_font,
+    tk_ui_font,
     ui_font,
 )
 from app.tray import SystemTrayManager
@@ -1712,7 +1714,7 @@ class TkinterUI:
                 text=desc,
                 font=ui_font(10),
                 text_color=pal["text_secondary"],
-                wraplength=self._s(210),
+                wraplength=self._s(240),
                 justify="left",
                 anchor="w",
             )
@@ -1863,7 +1865,7 @@ class TkinterUI:
         dur_entry.bind("<Return>", lambda _e: _handle_start())
         goal_entry.focus_set()
 
-        self._fit_window(self.root, min_w=560, min_h=480, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+        self._fit_window(self.root, min_w=600, min_h=500, pos="center", pad_w=12, pad_h=12, allow_resize=True)
 
     def update_setup_progress(self, stage_text: str, running: bool = True) -> None:
         """Update staged startup progress text and indeterminate bar on Setup or HUD."""
@@ -2545,8 +2547,8 @@ class TkinterUI:
 
         self._fit_window(
             self.root,
-            min_w=440,
-            min_h=124,
+            min_w=480,
+            min_h=128,
             pos="top_right",
             explicit_pos=preserve_pos,
             pad_w=8,
@@ -3153,7 +3155,7 @@ class TkinterUI:
                 lb = tk.Listbox(
                     lb_wrap,
                     height=4,
-                    font=ui_font(10),
+                    font=tk_ui_font(9),
                     bg=pal["surface_alt"],
                     fg=pal["text"],
                     selectbackground=pal["primary"],
@@ -3932,7 +3934,7 @@ class TkinterUI:
             wrap="word",
             width=66,
             height=15,
-            font=mono_font(10) if "```" in review_text else ui_font(11),
+            font=tk_mono_font(10) if "```" in review_text else tk_ui_font(10),
             bg=pal["surface"],
             fg=pal["text"],
             insertbackground=pal["text"],
@@ -3958,10 +3960,10 @@ class TkinterUI:
         txt.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y", padx=(0, 3), pady=4)
         setattr(txt, "frame", txt_wrap)
-        txt.tag_configure("h1", font=ui_font(15, "bold", display=True), foreground=pal["h1"], spacing1=10, spacing3=5)
-        txt.tag_configure("h2", font=ui_font(12, "bold", display=True), foreground=pal["h2"], spacing1=10, spacing3=4)
-        txt.tag_configure("h3", font=ui_font(11, "bold"), foreground=pal["text"], spacing1=7, spacing3=3)
-        txt.tag_configure("bold", font=ui_font(11, "bold"), foreground=pal["text"])
+        txt.tag_configure("h1", font=tk_ui_font(14, "bold", display=True), foreground=pal["h1"], spacing1=10, spacing3=5)
+        txt.tag_configure("h2", font=tk_ui_font(12, "bold", display=True), foreground=pal["h2"], spacing1=10, spacing3=4)
+        txt.tag_configure("h3", font=tk_ui_font(10, "bold"), foreground=pal["text"], spacing1=7, spacing3=3)
+        txt.tag_configure("bold", font=tk_ui_font(10, "bold"), foreground=pal["text"])
         txt.tag_configure("bullet", lmargin1=16, lmargin2=30, spacing1=3, spacing3=2)
 
         self._render_markdown_into_text(txt, review_text)
