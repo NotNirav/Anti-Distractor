@@ -3940,13 +3940,22 @@ class TkinterUI:
             self.root.after(150, _clear_topmost)
 
     def _hide_popups_and_overlay_now(self) -> None:
-        """Synchronously close active popups and strict overlay on the Tk main thread."""
+        """Synchronously close active popups and strict banner on the Tk main thread."""
         if self._strict_countdown_after_id is not None and self._strict_overlay_win is not None:
             try:
                 self._strict_overlay_win.after_cancel(self._strict_countdown_after_id)
             except Exception:
                 pass
             self._strict_countdown_after_id = None
+
+        for seq in ("<Escape>", "<F12>"):
+            bind_id = getattr(self, f"_strict_root_bind_{seq}", None)
+            if bind_id:
+                try:
+                    self.root.unbind(seq, bind_id)
+                except Exception:
+                    pass
+                setattr(self, f"_strict_root_bind_{seq}", None)
 
         for popup in list(self._active_popups):
             try:
@@ -3980,7 +3989,7 @@ class TkinterUI:
         *,
         source_label: str | None = None,
     ) -> None:
-        """Display non-focus-stealing Layer 1 nudge on the HUD's monitor."""
+        """Display non-focus-stealing Layer 1 nudge on the active monitor's bottom-right work area."""
 
         def _action() -> None:
             pal = self._active_palette()
@@ -3988,57 +3997,71 @@ class TkinterUI:
 
             win = tk.Toplevel(self.root)
             win.title("Anti-Distractor — Quick Check")
+            win.overrideredirect(True)
             win.configure(bg=pal["surface"])
             win.attributes("-topmost", True)
             win.resizable(False, False)
             apply_brand_icon(self.root, win)
-            apply_dark_titlebar(win, dark=(self._theme == "dark"))
-            apply_noactivate_topmost(win)
 
-            tk.Frame(win, bg=pal["warning"], height=5).pack(fill="x")
+            shell = tk.Frame(win, bg=pal["surface"])
+            shell.pack(fill="both", expand=True)
 
-            body = tk.Frame(win, bg=pal["surface"], padx=18, pady=14)
-            body.pack(fill="both", expand=True)
+            card = SurfaceCard(
+                shell,
+                palette=pal,
+                fg_color=pal["surface"],
+                border_color=pal["border_strong"],
+                corner_radius=0,
+                border_width=1,
+            )
+            card.pack(fill="both", expand=True)
 
-            hdr = tk.Frame(body, bg=pal["surface"])
+            # Left 3px semantic amber rail
+            tk.Frame(card, bg=pal["warning"], width=4).pack(side="left", fill="y")
+
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.pack(side="left", fill="both", expand=True, padx=16, pady=14)
+
+            hdr = ctk.CTkFrame(body, fg_color="transparent")
             hdr.pack(fill="x", pady=(0, 8))
 
-            tk.Label(
+            ModernLabel(
                 hdr,
-                text="Quick Focus Check",
-                font=("Segoe UI", 12, "bold"),
-                bg=pal["surface"],
-                fg=pal["warning"],
+                text="Quick focus check",
+                font=ui_font(13, "bold", display=True),
+                text_color=pal["text"],
             ).pack(side="left")
 
-            tk.Label(
+            StatusPill(
                 hdr,
-                text="  NUDGE  ",
-                font=("Segoe UI", 7, "bold"),
+                text="Check-in",
                 bg=pal["warning_soft"],
                 fg=pal["warning"],
-                padx=5,
-                pady=2,
+                border=pal["warning_border"],
+                dot_color=pal["warning"],
+                font=ui_font(9, "bold"),
+                padx=7,
+                pady=1,
             ).pack(side="right")
 
-            tk.Label(
+            ModernLabel(
                 body,
                 text=f"Goal: {goal}",
-                font=("Segoe UI", 10, "bold"),
-                bg=pal["surface"],
-                fg=pal["text"],
-                wraplength=self._s(390),
+                font=ui_font(11, "bold"),
+                text_color=pal["text"],
+                wraplength=self._s(370),
                 justify="left",
+                anchor="w",
             ).pack(anchor="w", pady=(0, 4))
 
-            tk.Label(
+            ModernLabel(
                 body,
                 text=reason or "Current activity looks off-task.",
-                font=("Segoe UI", 9),
-                bg=pal["surface"],
-                fg=pal["text_secondary"],
-                wraplength=self._s(390),
+                font=ui_font(10),
+                text_color=pal["text_secondary"],
+                wraplength=self._s(370),
                 justify="left",
+                anchor="w",
             ).pack(anchor="w", pady=(0, 14))
 
             def _choose(choice: Literal["back_to_work", "relevant", "allow_domain"]) -> None:
@@ -4055,40 +4078,45 @@ class TkinterUI:
                     text=f"Always allow {clean_src} for this session",
                     command=lambda: _choose("allow_domain"),
                     variant="ghost",
-                    font=("Segoe UI", 8, "bold"),
+                    font=ui_font(10, "bold"),
                     padx=10,
                     pady=4,
+                    height=28,
                     palette=pal,
                 )
                 allow_btn.pack(fill="x", side="bottom", pady=(6, 0))
                 setattr(win, "_allow_domain_btn", allow_btn)
 
-            btn_row = tk.Frame(body, bg=pal["surface"])
+            btn_row = ctk.CTkFrame(body, fg_color="transparent")
             btn_row.pack(fill="x", side="bottom")
+            btn_row.columnconfigure(0, weight=1, uniform="l1")
+            btn_row.columnconfigure(1, weight=1, uniform="l1")
 
             back_btn = _make_button(
                 btn_row,
                 text="Back to work",
                 command=lambda: _choose("back_to_work"),
                 variant="primary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=12,
-                pady=8,
+                pady=7,
+                height=34,
                 palette=pal,
             )
-            back_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+            back_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
             rel_btn = _make_button(
                 btn_row,
                 text="This is relevant",
                 command=lambda: _choose("relevant"),
                 variant="secondary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=12,
-                pady=8,
+                pady=7,
+                height=34,
                 palette=pal,
             )
-            rel_btn.pack(side="left", expand=True, fill="x", padx=(6, 0))
+            rel_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
             win.bind("<Escape>", lambda _e: self._hide_popups_and_overlay_now())
             win.protocol("WM_DELETE_WINDOW", self._hide_popups_and_overlay_now)
@@ -4098,14 +4126,16 @@ class TkinterUI:
             self._fit_window(
                 win,
                 min_w=430,
-                min_h=190,
+                min_h=175,
                 pos="bottom_right",
                 monitor_rect=mon_rect,
-                pad_w=10,
-                pad_h=10,
+                pad_w=8,
+                pad_h=8,
                 allow_resize=False,
             )
+            apply_rounded_corners(win)
             apply_noactivate_topmost(win)
+            fade_in_window(win)
 
         self.dispatch(_action)
 
@@ -4124,56 +4154,80 @@ class TkinterUI:
 
             win = tk.Toplevel(self.root)
             win.title("Anti-Distractor — OFF-TASK WARNING")
+            win.overrideredirect(True)
             win.configure(bg=pal["surface"])
             win.attributes("-topmost", True)
             win.resizable(False, False)
             apply_brand_icon(self.root, win)
-            apply_dark_titlebar(win, dark=(self._theme == "dark"))
-            apply_noactivate_topmost(win)
 
-            banner_bg = "#C62828"
-            banner = tk.Frame(win, bg=banner_bg, padx=18, pady=12)
-            banner.pack(fill="x")
-            tk.Label(
-                banner,
-                text="OFF-TASK WARNING",
-                font=("Segoe UI", 13, "bold"),
-                bg=banner_bg,
-                fg="#FFFFFF",
-            ).pack(anchor="w")
+            shell = tk.Frame(win, bg=pal["surface"])
+            shell.pack(fill="both", expand=True)
 
-            body = tk.Frame(win, bg=pal["surface"], padx=18, pady=14)
-            body.pack(fill="both", expand=True)
+            card = SurfaceCard(
+                shell,
+                palette=pal,
+                fg_color=pal["surface"],
+                border_color=pal["danger_border"],
+                corner_radius=0,
+                border_width=1,
+            )
+            card.pack(fill="both", expand=True)
 
-            tk.Label(
+            tk.Frame(card, bg=pal["danger_solid"], width=4).pack(side="left", fill="y")
+
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.pack(side="left", fill="both", expand=True, padx=16, pady=14)
+
+            hdr = ctk.CTkFrame(body, fg_color="transparent")
+            hdr.pack(fill="x", pady=(0, 8))
+
+            ModernLabel(
+                hdr,
+                text="Off-task warning",
+                font=ui_font(13, "bold", display=True),
+                text_color=pal["danger"],
+            ).pack(side="left")
+
+            StatusPill(
+                hdr,
+                text="Alert",
+                bg=pal["danger_soft"],
+                fg=pal["danger"],
+                border=pal["danger_border"],
+                dot_color=pal["danger_solid"],
+                font=ui_font(9, "bold"),
+                padx=7,
+                pady=1,
+            ).pack(side="right")
+
+            ModernLabel(
                 body,
                 text=f"Return to your goal: {goal}",
-                font=("Segoe UI", 10, "bold"),
-                bg=pal["surface"],
-                fg=pal["text"],
-                wraplength=self._s(420),
+                font=ui_font(11, "bold"),
+                text_color=pal["text"],
+                wraplength=self._s(400),
                 justify="left",
-            ).pack(anchor="w", pady=(0, 6))
+                anchor="w",
+            ).pack(anchor="w", pady=(0, 4))
 
-            tk.Label(
+            ModernLabel(
                 body,
                 text=reason or "Distraction detected.",
-                font=("Segoe UI", 9),
-                bg=pal["surface"],
-                fg=pal["text_secondary"],
-                wraplength=self._s(420),
+                font=ui_font(10),
+                text_color=pal["text_secondary"],
+                wraplength=self._s(400),
                 justify="left",
-            ).pack(anchor="w", pady=(0, 16))
+                anchor="w",
+            ).pack(anchor="w", pady=(0, 14))
 
-            footer = tk.Frame(body, bg=pal["surface"])
+            footer = ctk.CTkFrame(body, fg_color="transparent")
             footer.pack(fill="x", side="bottom")
 
-            countdown_lbl = tk.Label(
+            countdown_lbl = ModernLabel(
                 footer,
                 text="Auto-closes in 12s",
-                font=("Segoe UI", 8),
-                bg=pal["surface"],
-                fg=pal["text_muted"],
+                font=mono_font(10),
+                text_color=pal["text_muted"],
             )
             countdown_lbl.pack(side="left")
 
@@ -4182,9 +4236,10 @@ class TkinterUI:
                 text="Dismiss — Back to Work",
                 command=self._hide_popups_and_overlay_now,
                 variant="danger",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=14,
-                pady=7,
+                pady=6,
+                height=32,
                 palette=pal,
             )
             dismiss_btn.pack(side="right")
@@ -4220,20 +4275,22 @@ class TkinterUI:
             mon_rect = self._get_hud_monitor_work_area()
             self._fit_window(
                 win,
-                min_w=460,
-                min_h=215,
+                min_w=450,
+                min_h=175,
                 pos="bottom_right",
                 monitor_rect=mon_rect,
-                pad_w=10,
-                pad_h=10,
+                pad_w=8,
+                pad_h=8,
                 allow_resize=False,
             )
+            apply_rounded_corners(win)
             apply_noactivate_topmost(win)
+            fade_in_window(win)
 
         self.dispatch(_action)
 
     def show_tier0_shift_popup(self, message: str) -> None:
-        """Display a warning dialog that AI models are unavailable and shifting to Tier 0 rules only."""
+        """Display a non-focus-stealing notice that AI is offline and Tier 0 rules are active."""
 
         def _action() -> None:
             pal = self._active_palette()
@@ -4249,42 +4306,66 @@ class TkinterUI:
 
             win = tk.Toplevel(self.root)
             win.title("Anti-Distractor — AI Shift Notice")
+            win.overrideredirect(True)
             win.configure(bg=pal["surface"])
             win.attributes("-topmost", True)
             win.resizable(False, False)
             apply_brand_icon(self.root, win)
-            apply_dark_titlebar(win, dark=(self._theme == "dark"))
-            apply_noactivate_topmost(win)
 
-            banner_bg = "#C62828"
-            banner = tk.Frame(win, bg=banner_bg, padx=18, pady=12)
-            banner.pack(fill="x")
-            tk.Label(
-                banner,
-                text="AI Models Offline — Tier 0 Rules Active",
-                font=("Segoe UI", 11, "bold"),
-                bg=banner_bg,
-                fg="#FFFFFF",
-            ).pack(anchor="w")
+            shell = tk.Frame(win, bg=pal["surface"])
+            shell.pack(fill="both", expand=True)
 
-            body = tk.Frame(win, bg=pal["surface"], padx=18, pady=14)
-            body.pack(fill="both", expand=True)
+            card = SurfaceCard(
+                shell,
+                palette=pal,
+                fg_color=pal["surface"],
+                border_color=pal["danger_border"],
+                corner_radius=0,
+                border_width=1,
+            )
+            card.pack(fill="both", expand=True)
 
-            tk.Label(
+            tk.Frame(card, bg=pal["danger_solid"], width=4).pack(side="left", fill="y")
+
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.pack(side="left", fill="both", expand=True, padx=16, pady=14)
+
+            hdr = ctk.CTkFrame(body, fg_color="transparent")
+            hdr.pack(fill="x", pady=(0, 8))
+
+            ModernLabel(
+                hdr,
+                text="AI unavailable — Local rules active",
+                font=ui_font(12, "bold", display=True),
+                text_color=pal["danger"],
+            ).pack(side="left")
+
+            StatusPill(
+                hdr,
+                text="Tier 0",
+                bg=pal["danger_soft"],
+                fg=pal["danger"],
+                border=pal["danger_border"],
+                dot_color=pal["danger_solid"],
+                font=ui_font(9, "bold"),
+                padx=7,
+                pady=1,
+            ).pack(side="right")
+
+            ModernLabel(
                 body,
                 text=(
                     message
-                    or "All AI models (Gemini 3.5 Flash-Lite, Gemma 31B, Gemma 4 26B A4B) are currently experiencing "
-                    "quota limits or high demand.\n\n"
-                    "Anti-Distractor has shifted to Tier 0 local rules only (allowed/blocked domain and app lists) "
-                    "to maintain your focus protection until an AI model becomes available."
+                    or "All AI models are currently unreachable or rate-limited. "
+                    "Anti-Distractor shifted to Tier 0 local rules (domain and app allow/block lists) "
+                    "so your focus protection continues uninterrupted."
                 ),
-                font=("Segoe UI", 9),
-                bg=pal["surface"],
-                fg=pal["text_secondary"],
-                wraplength=self._s(440),
+                font=ui_font(10),
+                text_color=pal["text_secondary"],
+                wraplength=self._s(410),
                 justify="left",
-            ).pack(anchor="w", pady=(0, 16))
+                anchor="w",
+            ).pack(anchor="w", pady=(0, 14))
 
             def _close_tier0() -> None:
                 try:
@@ -4297,17 +4378,18 @@ class TkinterUI:
                 except Exception:
                     pass
 
-            btn_row = tk.Frame(body, bg=pal["surface"])
+            btn_row = ctk.CTkFrame(body, fg_color="transparent")
             btn_row.pack(fill="x", side="bottom")
 
             btn = _make_button(
                 btn_row,
-                text="Understood (Continue with Tier 0 Rules)",
+                text="Understood",
                 command=_close_tier0,
                 variant="primary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=14,
-                pady=7,
+                pady=6,
+                height=32,
                 palette=pal,
             )
             btn.pack(side="right")
@@ -4320,15 +4402,17 @@ class TkinterUI:
             mon_rect = self._get_hud_monitor_work_area()
             self._fit_window(
                 win,
-                min_w=480,
-                min_h=225,
-                pos="upper_center",
+                min_w=460,
+                min_h=175,
+                pos="bottom_right",
                 monitor_rect=mon_rect,
-                pad_w=12,
-                pad_h=12,
+                pad_w=8,
+                pad_h=8,
                 allow_resize=False,
             )
+            apply_rounded_corners(win)
             apply_noactivate_topmost(win)
+            fade_in_window(win)
 
         self.dispatch(_action)
 
@@ -4339,85 +4423,90 @@ class TkinterUI:
         lockout_seconds: float,
         on_lockout_done: Callable[[], None],
     ) -> None:
-        """Display Strict-mode multi-monitor topmost overlay with countdown, progress bar, and Esc/F12 exit."""
+        """Display compact, non-focus-stealing Strict-mode banner on the active monitor (not full screen)."""
 
         def _action() -> None:
-            pal = LIGHT_PALETTE  # Strict overlay intentionally stays high-contrast dark
+            pal = DARK_PALETTE
             self._hide_popups_and_overlay_now()
 
             win = tk.Toplevel(self.root)
-            win.title("Anti-Distractor — Strict Lockout")
+            win.title("Anti-Distractor — Strict Banner")
             win.overrideredirect(True)
             win.attributes("-topmost", True)
-            win.configure(bg=pal["overlay_bg"])
-
-            vx, vy, vw, vh, primary_w, primary_h = self._get_virtual_screen_bounds()
-            win.geometry(f"{vw}x{vh}+{vx}+{vy}")
+            win.resizable(False, False)
+            win.configure(bg=pal["surface"])
             self._strict_overlay_win = win
 
-            card = tk.Frame(
-                win,
-                bg=pal["overlay_card"],
-                padx=40,
-                pady=34,
-                highlightthickness=1,
-                highlightbackground=pal["overlay_border"],
-            )
-            center_x = max(240, (-vx) + (primary_w // 2))
-            center_y = max(180, (-vy) + (primary_h // 2))
-            card.place(x=center_x, y=center_y, anchor="center")
+            shell = tk.Frame(win, bg=pal["surface"])
+            shell.pack(fill="both", expand=True)
 
-            tk.Label(
-                card,
-                text="  STRICT FOCUS LOCKOUT  ",
-                font=("Segoe UI", 9, "bold"),
-                bg="#C62828",
-                fg="#FFFFFF",
+            card = SurfaceCard(
+                shell,
+                palette=pal,
+                fg_color=pal["surface"],
+                border_color=pal["danger_border"],
+                corner_radius=0,
+                border_width=1,
+            )
+            card.pack(fill="both", expand=True)
+
+            tk.Frame(card, bg=pal["danger_solid"], width=4).pack(side="left", fill="y")
+
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.pack(side="left", fill="both", expand=True, padx=16, pady=14)
+
+            hdr = ctk.CTkFrame(body, fg_color="transparent")
+            hdr.pack(fill="x", pady=(0, 8))
+
+            StatusPill(
+                hdr,
+                text="Strict lockout",
+                bg=pal["danger_soft"],
+                fg=pal["danger"],
+                border=pal["danger_border"],
+                dot_color=pal["danger_solid"],
+                font=ui_font(10, "bold"),
                 padx=8,
-                pady=3,
-            ).pack(pady=(0, 16))
+                pady=2,
+            ).pack(side="left")
 
-            max_wrap = max(360, min(self._s(640), primary_w - 160))
-            tk.Label(
-                card,
-                text=f"Start {goal} again",
-                font=("Segoe UI", 24, "bold"),
-                bg=pal["overlay_card"],
-                fg=pal["overlay_text"],
-                wraplength=max_wrap,
-                justify="center",
-            ).pack(pady=(0, 10))
-
-            tk.Label(
-                card,
-                text=reason or "Strict mode lockout active.",
-                font=("Segoe UI", 12),
-                bg=pal["overlay_card"],
-                fg=pal["overlay_reason"],
-                wraplength=max_wrap,
-                justify="center",
-            ).pack(pady=(0, 22))
-
-            countdown_lbl = tk.Label(
-                card,
+            countdown_lbl = ModernLabel(
+                hdr,
                 text="",
-                font=("Segoe UI", 16, "bold"),
-                bg=pal["overlay_card"],
-                fg=pal["overlay_countdown"],
+                font=mono_font(14, "bold"),
+                text_color=pal["warning"],
             )
-            countdown_lbl.pack(pady=(0, 12))
+            countdown_lbl.pack(side="right")
 
-            bar_w = self._s(340)
-            bar_h = self._s(8)
-            progress = tk.Canvas(
-                card,
-                width=bar_w,
-                height=bar_h,
-                bg="#0F172A",
-                highlightthickness=0,
+            ModernLabel(
+                body,
+                text=f"Return to {goal}",
+                font=ui_font(13, "bold", display=True),
+                text_color=pal["text"],
+                wraplength=self._s(410),
+                justify="left",
+                anchor="w",
+            ).pack(anchor="w", pady=(0, 4))
+
+            ModernLabel(
+                body,
+                text=reason or "Distracting tab closed — stay locked on your focus goal.",
+                font=ui_font(10),
+                text_color=pal["text_secondary"],
+                wraplength=self._s(410),
+                justify="left",
+                anchor="w",
+            ).pack(anchor="w", pady=(0, 12))
+
+            progress = ModernProgressBar(
+                body,
+                palette=pal,
+                progress_color=pal["warning"],
+                height=5,
+                mode="determinate",
             )
-            progress.pack(pady=(0, 26))
-            bar_fill = progress.create_rectangle(0, 0, bar_w, bar_h, fill=pal["overlay_countdown"], width=0)
+            progress.set(1.0)
+            progress.pack(fill="x", pady=(0, 12))
 
             completed = False
 
@@ -4430,33 +4519,54 @@ class TkinterUI:
                 try:
                     on_lockout_done()
                 except Exception:
-                    logger.exception("Error in strict overlay on_lockout_done callback")
+                    logger.exception("Error in strict banner on_lockout_done callback")
 
-            escape_btn = tk.Button(
-                card,
-                text="Emergency Exit (Esc / F12)",
-                font=("Segoe UI", 9, "bold"),
-                bg="#334155",
-                fg="#E2E8F0",
-                activebackground="#475569",
-                activeforeground="#FFFFFF",
-                relief="flat",
-                bd=0,
-                padx=16,
-                pady=8,
-                cursor="hand2",
+            footer = ctk.CTkFrame(body, fg_color="transparent")
+            footer.pack(fill="x")
+
+            ModernLabel(
+                footer,
+                text="Press Esc or F12 to dismiss",
+                font=ui_font(10),
+                text_color=pal["text_muted"],
+            ).pack(side="left")
+
+            escape_btn = _make_button(
+                footer,
+                text="Dismiss (Esc / F12)",
                 command=_finish_lockout,
+                variant="secondary",
+                font=ui_font(10, "bold"),
+                padx=12,
+                pady=5,
+                height=30,
+                palette=pal,
             )
-            _bind_hover(escape_btn, "#334155", "#475569")
-            escape_btn.pack()
+            escape_btn.pack(side="right")
 
             win.bind("<Escape>", lambda _event: _finish_lockout())
             win.bind("<F12>", lambda _event: _finish_lockout())
-            win.protocol("WM_DELETE_WINDOW", lambda: None)
             try:
-                win.focus_force()
+                setattr(self, "_strict_root_bind_<Escape>", self.root.bind("<Escape>", lambda _e: _finish_lockout(), add="+"))
+                setattr(self, "_strict_root_bind_<F12>", self.root.bind("<F12>", lambda _e: _finish_lockout(), add="+"))
             except Exception:
                 pass
+            win.protocol("WM_DELETE_WINDOW", _finish_lockout)
+
+            mon_rect = self._get_hud_monitor_work_area()
+            self._fit_window(
+                win,
+                min_w=460,
+                min_h=170,
+                pos="bottom_right",
+                monitor_rect=mon_rect,
+                pad_w=8,
+                pad_h=8,
+                allow_resize=False,
+            )
+            apply_rounded_corners(win)
+            apply_noactivate_topmost(win)
+            fade_in_window(win)
 
             total_secs = max(0.1, float(lockout_seconds))
             deadline = time.monotonic() + max(0.0, float(lockout_seconds))
@@ -4469,10 +4579,10 @@ class TkinterUI:
                     _finish_lockout()
                     return
                 secs = math.ceil(remaining)
-                countdown_lbl.config(text=f"Lockout ends in {secs}s")
+                countdown_lbl.configure(text=f"{secs}s")
                 ratio = max(0.0, min(1.0, remaining / total_secs))
                 try:
-                    progress.coords(bar_fill, 0, 0, int(bar_w * ratio), bar_h)
+                    progress.set(ratio)
                 except Exception:
                     pass
                 self._strict_countdown_after_id = win.after(150, _tick)
