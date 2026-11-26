@@ -338,7 +338,7 @@ class ModernButton(ctk.CTkButton):
             height=calc_h,
             corner_radius=corner_radius,
             border_width=bd_w,
-            border_color=bd_color if bd_w > 0 else bg,
+            border_color=bd_color,
             fg_color=bg,
             hover_color=hover_bg,
             text_color=fg,
@@ -371,7 +371,7 @@ class ModernButton(ctk.CTkButton):
             "hover_color": hover_bg,
             "text_color": fg,
             "border_width": bd_w,
-            "border_color": bd_color if bd_w > 0 else bg,
+            "border_color": bd_color,
         }
         if text is not None:
             cfg["text"] = text
@@ -603,6 +603,10 @@ class ModernProgressBar(ctk.CTkProgressBar):
             indeterminate_speed=0.75,
             **kwargs,
         )
+
+    def start(self, interval: Any = None) -> None:  # type: ignore[override]
+        """Start indeterminate animation (accepting optional ttk-compatible interval arg)."""
+        super().start()
 
 
 def make_button(
