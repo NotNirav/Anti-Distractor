@@ -2139,7 +2139,7 @@ class TkinterUI:
 
             self._hud_state_label = StatusPill(  # type: ignore[assignment]
                 pill_row,
-                text=f"● {pill_text}",
+                text=pill_text,
                 bg=pill_bg,
                 fg=pill_fg,
                 border=pill_bd,
@@ -2546,11 +2546,11 @@ class TkinterUI:
         self._fit_window(
             self.root,
             min_w=440,
-            min_h=148,
+            min_h=124,
             pos="top_right",
             explicit_pos=preserve_pos,
             pad_w=8,
-            pad_h=6,
+            pad_h=4,
             allow_resize=False,
         )
 
@@ -2591,7 +2591,7 @@ class TkinterUI:
                 return
             if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
                 badge_txt = self._format_state_badge_text().strip()
-                if self._hud_mini_mode:
+                if self._hud_mini_mode and not isinstance(self._hud_state_label, StatusPill):
                     badge_txt = f"● {badge_txt}"
                 self._hud_state_label.configure(text=badge_txt)
 
@@ -2660,11 +2660,11 @@ class TkinterUI:
 
                 if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
                     bg, fg, bd, dot = get_state_pill_style(self._theme, "PAUSED", paused=True)
-                    lbl_txt = "● PAUSED" if self._hud_mini_mode else "PAUSED"
+                    lbl_txt = "PAUSED"
                     if isinstance(self._hud_state_label, StatusPill):
                         self._hud_state_label.set_pill(text=lbl_txt, bg=bg, fg=fg, border=bd, dot_color=dot)
                     else:
-                        self._hud_state_label.configure(text=lbl_txt, bg=bg, fg=fg)
+                        self._hud_state_label.configure(text="● PAUSED" if self._hud_mini_mode else "PAUSED", bg=bg, fg=fg)
                 if self._hud_summary_label is not None and self._hud_summary_label.winfo_exists():
                     self._hud_summary_label.configure(
                         text=self._hud_pause_summary,
@@ -2687,12 +2687,10 @@ class TkinterUI:
                 if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
                     bg, fg, bd, dot = get_state_pill_style(self._theme, self._hud_last_state, paused=False)
                     lbl_txt = self._format_state_badge_text().strip()
-                    if self._hud_mini_mode:
-                        lbl_txt = f"● {lbl_txt}"
                     if isinstance(self._hud_state_label, StatusPill):
                         self._hud_state_label.set_pill(text=lbl_txt, bg=bg, fg=fg, border=bd, dot_color=dot)
                     else:
-                        self._hud_state_label.configure(text=lbl_txt, bg=bg, fg=fg)
+                        self._hud_state_label.configure(text=f"● {lbl_txt}" if self._hud_mini_mode else lbl_txt, bg=bg, fg=fg)
                 if self._hud_pause_btn is not None and self._hud_pause_btn.winfo_exists():
                     p_txt = "Pause" if self._hud_mini_mode else f"Pause {self._break_minutes}m"
                     _set_button_variant(self._hud_pause_btn, "secondary", text=p_txt, palette=pal)
@@ -2729,12 +2727,10 @@ class TkinterUI:
                 if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
                     bg, fg, bd, dot = get_state_pill_style(self._theme, state, paused=False)
                     lbl_txt = self._format_state_badge_text().strip()
-                    if self._hud_mini_mode:
-                        lbl_txt = f"● {lbl_txt}"
                     if isinstance(self._hud_state_label, StatusPill):
                         self._hud_state_label.set_pill(text=lbl_txt, bg=bg, fg=fg, border=bd, dot_color=dot)
                     else:
-                        self._hud_state_label.configure(text=lbl_txt, bg=bg, fg=fg)
+                        self._hud_state_label.configure(text=f"● {lbl_txt}" if self._hud_mini_mode else lbl_txt, bg=bg, fg=fg)
 
                 if self._hud_summary_label is not None and self._hud_summary_label.winfo_exists():
                     display_summary = summary if len(summary) <= 85 else f"{summary[:82]}..."
@@ -3167,10 +3163,18 @@ class TkinterUI:
                     highlightthickness=1,
                     highlightbackground=pal["border"],
                 )
-                sb = tk.Scrollbar(lb_wrap, orient="vertical", command=lb.yview)
+                sb = ctk.CTkScrollbar(
+                    lb_wrap,
+                    orientation="vertical",
+                    command=lb.yview,
+                    fg_color="transparent",
+                    button_color=pal["border_strong"],
+                    button_hover_color=pal["text_muted"],
+                    width=10,
+                )
                 lb.configure(yscrollcommand=sb.set)
                 lb.pack(side="left", fill="both", expand=True)
-                sb.pack(side="right", fill="y")
+                sb.pack(side="right", fill="y", padx=(2, 0))
 
                 for item in items:
                     if item:
@@ -3915,8 +3919,16 @@ class TkinterUI:
             new_btn.pack(side="right", padx=(0, 8))
 
         # Scrollable review card (direct child of _current_frame so tk.Text stays within 2 levels)
-        txt = scrolledtext.ScrolledText(
+        txt_wrap = tk.Frame(
             frame,
+            bg=pal["surface"],
+            highlightthickness=1,
+            highlightbackground=pal["border_strong"],
+        )
+        txt_wrap.pack(fill="both", expand=True)
+
+        txt = tk.Text(
+            txt_wrap,
             wrap="word",
             width=66,
             height=15,
@@ -3926,15 +3938,26 @@ class TkinterUI:
             insertbackground=pal["text"],
             relief="flat",
             bd=0,
-            highlightthickness=1,
-            highlightbackground=pal["border_strong"],
+            highlightthickness=0,
             padx=20,
             pady=16,
             spacing1=3,
             spacing2=4,
             spacing3=3,
         )
-        txt.pack(fill="both", expand=True)
+        sb = ctk.CTkScrollbar(
+            txt_wrap,
+            orientation="vertical",
+            command=txt.yview,
+            fg_color="transparent",
+            button_color=pal["border_strong"],
+            button_hover_color=pal["text_muted"],
+            width=10,
+        )
+        txt.configure(yscrollcommand=sb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y", padx=(0, 3), pady=4)
+        setattr(txt, "frame", txt_wrap)
         txt.tag_configure("h1", font=ui_font(15, "bold", display=True), foreground=pal["h1"], spacing1=10, spacing3=5)
         txt.tag_configure("h2", font=ui_font(12, "bold", display=True), foreground=pal["h2"], spacing1=10, spacing3=4)
         txt.tag_configure("h3", font=ui_font(11, "bold"), foreground=pal["text"], spacing1=7, spacing3=3)

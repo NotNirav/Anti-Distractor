@@ -603,10 +603,18 @@ class HistoryAnalyticsDialog:
             highlightthickness=1,
             highlightbackground=palette["border"],
         )
-        sb = tk.Scrollbar(lb_wrap, orient="vertical", command=lb.yview)
+        sb = ctk.CTkScrollbar(
+            lb_wrap,
+            orientation="vertical",
+            command=lb.yview,
+            fg_color="transparent",
+            button_color=palette["border_strong"],
+            button_hover_color=palette["text_muted"],
+            width=10,
+        )
         lb.configure(yscrollcommand=sb.set)
         lb.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        sb.pack(side="right", fill="y", padx=(2, 0))
         self.listbox = lb
 
         for s in self.sessions:

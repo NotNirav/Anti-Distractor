@@ -466,7 +466,7 @@ def test_ui_hud_extension_dot_pause_theme_rules_tray_and_multimonitor_overlay():
         _flush_events(ui, root)
         assert any(ev[0] == "stop" for ev in tray_events)
 
-        # 5. Multi-Monitor Virtual Screen Overlay Bounds
+        # 5. Multi-Monitor Virtual Screen Bounds & Compact Bottom-Right Strict Banner
         metrics = {76: -1920, 77: 0, 78: 3840, 79: 1080, 0: 1920, 1: 1080}
         with patch("app.ui.ctypes.windll.user32.GetSystemMetrics", side_effect=lambda idx: metrics[idx]):
             bounds = ui._get_virtual_screen_bounds()
@@ -475,9 +475,14 @@ def test_ui_hud_extension_dot_pause_theme_rules_tray_and_multimonitor_overlay():
             _flush_events(ui, root)
             assert ui._strict_overlay_win is not None
             geom = ui._strict_overlay_win.geometry()
-            assert "3840x1080" in geom
+            dims_part = geom.split("+")[0]
+            bw, bh = (int(x) for x in dims_part.split("x"))
+            assert 300 <= bw <= 750
+            assert 120 <= bh <= 350
+            assert bool(ui._strict_overlay_win.attributes("-topmost")) is True
             ui.hide_popups_and_overlay()
             _flush_events(ui, root)
+            assert ui._strict_countdown_after_id is None
     finally:
         ui.close()
 
@@ -871,5 +876,19 @@ def test_ui_smarter_rules_popups_review_kpis_vault_and_dialogs(tmp_path):
         _flush_events(ui, root)
         assert len(preserved_saved) == 1
         assert preserved_saved[0].onboarding_skipped is True
+
+        # 11. Minimize-to-taskbar safety and Strict banner Escape dismissal
+        ui.minimize_to_taskbar()
+        _flush_events(ui, root)
+        lockout_done: list[bool] = []
+        ui.show_strict_overlay("Study", "Off-task", 6.0, lambda: lockout_done.append(True))
+        _flush_events(ui, root)
+        assert ui._strict_overlay_win is not None
+        assert ui._strict_countdown_after_id is not None
+        ui._strict_overlay_win.event_generate("<Escape>")
+        _flush_events(ui, root)
+        if ui._strict_overlay_win is not None:
+            ui.hide_popups_and_overlay()
+            _flush_events(ui, root)
     finally:
         ui.close()

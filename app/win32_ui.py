@@ -153,6 +153,16 @@ def apply_dark_titlebar(win: tk.Misc, dark: bool) -> None:
                 ctypes.byref(value),
                 ctypes.sizeof(value),
             )
+        # Prompt DWM to redraw the non-client titlebar immediately
+        u32.SetWindowPos(
+            wintypes.HWND(hwnd),
+            wintypes.HWND(0),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | 0x0004 | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
     except Exception:
         logger.debug("DwmSetWindowAttribute unavailable or failed", exc_info=True)
 
