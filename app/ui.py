@@ -2974,47 +2974,48 @@ class TkinterUI:
 
             current_topics: list[str] = list(profile.on_task_topics)
 
-            outer = tk.Frame(win, bg=pal["bg"], padx=18, pady=14)
+            outer = tk.Frame(win, bg=pal["bg"], padx=20, pady=16)
             outer.pack(fill="both", expand=True)
 
-            tk.Label(
+            ModernLabel(
                 outer,
-                text="Editable Domain & App Rules",
-                font=("Segoe UI", 13, "bold"),
-                bg=pal["bg"],
-                fg=pal["text"],
+                text="Focus rules",
+                font=ui_font(16, "bold", display=True),
+                text_color=pal["text"],
             ).pack(anchor="w")
 
-            tk.Label(
+            ModernLabel(
                 outer,
                 text=f"Goal: {profile.goal} — changes apply immediately without restarting.",
-                font=("Segoe UI", 9),
-                bg=pal["bg"],
-                fg=pal["text_secondary"],
+                font=ui_font(11),
+                text_color=pal["text_secondary"],
                 wraplength=self._s(520),
                 justify="left",
-            ).pack(anchor="w", pady=(2, 8))
+                anchor="w",
+            ).pack(anchor="w", pady=(2, 10))
 
             # Optional mid-session 1-click "Current Site/App" shortcut banner
-            quick_allow_btn: tk.Button | None = None
-            quick_block_btn: tk.Button | None = None
+            quick_allow_btn: Any = None
+            quick_block_btn: Any = None
             if active_target is not None and active_target[1]:
                 t_kind, t_val = active_target
-                banner = tk.Frame(
+                banner = SurfaceCard(
                     outer,
-                    bg=pal["surface"],
-                    padx=10,
-                    pady=6,
-                    highlightthickness=1,
-                    highlightbackground=pal["border_strong"],
+                    palette=pal,
+                    fg_color=pal["surface"],
+                    border_color=pal["border_strong"],
+                    corner_radius=RADII["md"],
+                    border_width=1,
                 )
-                banner.pack(fill="x", pady=(0, 8))
-                tk.Label(
-                    banner,
+                banner.pack(fill="x", pady=(0, 10))
+                banner_in = ctk.CTkFrame(banner, fg_color="transparent")
+                banner_in.pack(fill="x", padx=12, pady=8)
+
+                ModernLabel(
+                    banner_in,
                     text=f"Current {t_kind}: {t_val}",
-                    font=("Segoe UI", 9, "bold"),
-                    bg=pal["surface"],
-                    fg=pal["text"],
+                    font=ui_font(11, "bold"),
+                    text_color=pal["text"],
                 ).pack(side="left")
 
                 def _quick_add(allow: bool) -> None:
@@ -3027,63 +3028,64 @@ class TkinterUI:
                     _insert_with_dedup(dest, t_val, is_domain=(t_kind == "domain"))
 
                 quick_block_btn = _make_button(
-                    banner,
+                    banner_in,
                     text="Block",
                     command=lambda: _quick_add(False),
                     variant="danger_outline",
-                    font=("Segoe UI", 8, "bold"),
-                    padx=8,
+                    font=ui_font(10, "bold"),
+                    padx=10,
                     pady=3,
+                    height=26,
                     palette=pal,
                 )
                 quick_block_btn.pack(side="right")
 
                 quick_allow_btn = _make_button(
-                    banner,
+                    banner_in,
                     text="+ Allow",
                     command=lambda: _quick_add(True),
                     variant="secondary",
-                    font=("Segoe UI", 8, "bold"),
-                    padx=8,
+                    font=ui_font(10, "bold"),
+                    padx=10,
                     pady=3,
+                    height=26,
                     palette=pal,
                 )
                 quick_allow_btn.pack(side="right", padx=(0, 6))
 
             # Tab switcher bar + optional pre-session AI Suggest Rules button
-            tab_bar = tk.Frame(outer, bg=pal["bg"])
-            tab_bar.pack(fill="x", pady=(0, 8))
+            tab_bar = ctk.CTkFrame(outer, fg_color="transparent")
+            tab_bar.pack(fill="x", pady=(0, 10))
 
-            footer = tk.Frame(outer, bg=pal["bg"])
+            footer = ctk.CTkFrame(outer, fg_color="transparent")
             footer.pack(fill="x", side="bottom", pady=(10, 0))
 
-            status_note = tk.Label(
+            status_note = ModernLabel(
                 outer,
                 text="Tip: Select any entry and press Delete or Backspace to remove it.",
-                font=("Segoe UI", 8),
-                bg=pal["bg"],
-                fg=pal["text_muted"],
+                font=ui_font(10),
+                text_color=pal["text_muted"],
                 anchor="w",
             )
-            status_note.pack(fill="x", side="bottom", pady=(6, 0))
+            status_note.pack(fill="x", side="bottom", pady=(8, 0))
 
-            content_holder = tk.Frame(
+            content_holder = SurfaceCard(
                 outer,
-                bg=pal["surface"],
-                padx=14,
-                pady=12,
-                highlightthickness=1,
-                highlightbackground=pal["border_strong"],
+                palette=pal,
+                fg_color=pal["surface"],
+                border_color=pal["border_strong"],
+                corner_radius=RADII["lg"],
+                border_width=1,
             )
             content_holder.pack(fill="both", expand=True)
 
-            websites_frame = tk.Frame(content_holder, bg=pal["surface"])
-            apps_frame = tk.Frame(content_holder, bg=pal["surface"])
+            websites_frame = ctk.CTkFrame(content_holder, fg_color="transparent")
+            apps_frame = ctk.CTkFrame(content_holder, fg_color="transparent")
 
             listboxes: dict[str, tk.Listbox] = {}
-            entries: dict[str, ttk.Entry] = {}
-            add_btns: dict[str, tk.Button] = {}
-            remove_btns: dict[str, tk.Button] = {}
+            entries: dict[str, Any] = {}
+            add_btns: dict[str, Any] = {}
+            remove_btns: dict[str, Any] = {}
 
             section_labels = {
                 "allowed_domains": "Allowed Websites",
@@ -3098,7 +3100,7 @@ class TkinterUI:
             def _insert_with_dedup(target_key: str, raw_val: str, *, is_domain: bool) -> bool:
                 norm = normalize_domain(raw_val) if is_domain else raw_val.strip().lower()
                 if not norm:
-                    status_note.configure(text="Enter a valid domain (e.g. github.com) or .exe name.", fg=pal["danger"])
+                    status_note.configure(text="Enter a valid domain (e.g. github.com) or .exe name.", text_color=pal["danger"])
                     return False
 
                 siblings = domain_keys if is_domain else app_keys
@@ -3121,12 +3123,12 @@ class TkinterUI:
                 if moved_from:
                     status_note.configure(
                         text=f"Moved '{norm}' from {', '.join(moved_from)} → {section_labels[target_key]}.",
-                        fg=pal["primary"],
+                        text_color=pal["primary"],
                     )
                 else:
                     status_note.configure(
                         text=f"Added '{norm}' to {section_labels[target_key]}.",
-                        fg=pal["text_secondary"],
+                        text_color=pal["text_secondary"],
                     )
                 return True
 
@@ -3139,16 +3141,15 @@ class TkinterUI:
                 is_domain: bool,
                 placeholder: str,
             ) -> None:
-                sec = tk.Frame(parent, bg=pal["surface"], pady=4)
-                sec.pack(fill="both", expand=True, pady=(0, 6))
+                sec = ctk.CTkFrame(parent, fg_color="transparent")
+                sec.pack(fill="both", expand=True, padx=14, pady=(8, 6))
 
-                tk.Label(
+                ModernLabel(
                     sec,
                     text=heading,
-                    font=("Segoe UI", 9, "bold"),
-                    bg=pal["surface"],
-                    fg=accent,
-                ).pack(anchor="w", pady=(0, 3))
+                    font=ui_font(10, "bold"),
+                    text_color=accent,
+                ).pack(anchor="w", pady=(0, 4))
 
                 lb_wrap = tk.Frame(sec, bg=pal["surface"])
                 lb_wrap.pack(fill="both", expand=True)
@@ -3156,7 +3157,7 @@ class TkinterUI:
                 lb = tk.Listbox(
                     lb_wrap,
                     height=4,
-                    font=("Segoe UI", 9),
+                    font=ui_font(10),
                     bg=pal["surface_alt"],
                     fg=pal["text"],
                     selectbackground=pal["primary"],
@@ -3176,11 +3177,11 @@ class TkinterUI:
                         lb.insert("end", item)
                 listboxes[key] = lb
 
-                ctrl = tk.Frame(sec, bg=pal["surface"], pady=4)
-                ctrl.pack(fill="x")
+                ctrl = ctk.CTkFrame(sec, fg_color="transparent")
+                ctrl.pack(fill="x", pady=(6, 0))
 
                 ent_var = tk.StringVar()
-                ent = ttk.Entry(ctrl, textvariable=ent_var, font=("Segoe UI", 9), style="Modern.TEntry")
+                ent = ModernEntry(ctrl, palette=pal, textvariable=ent_var, font=ui_font(10), height=30)
                 ent.pack(side="left", fill="x", expand=True, padx=(0, 6))
                 entries[key] = ent
 
@@ -3205,9 +3206,10 @@ class TkinterUI:
                     text=f"+ Add {placeholder}",
                     command=_add,
                     variant="secondary",
-                    font=("Segoe UI", 8, "bold"),
-                    padx=8,
+                    font=ui_font(10, "bold"),
+                    padx=10,
                     pady=4,
+                    height=30,
                     palette=pal,
                 )
                 add_btn.pack(side="left", padx=(0, 4))
@@ -3218,9 +3220,10 @@ class TkinterUI:
                     text="Remove",
                     command=_remove,
                     variant="danger_outline",
-                    font=("Segoe UI", 8, "bold"),
-                    padx=8,
+                    font=ui_font(10, "bold"),
+                    padx=10,
                     pady=4,
+                    height=30,
                     palette=pal,
                 )
                 rem_btn.pack(side="left")
@@ -3229,7 +3232,7 @@ class TkinterUI:
             _make_section(
                 websites_frame,
                 "allowed_domains",
-                "ALLOWED WEBSITES (Always On-Task)",
+                "Allowed websites (always on-task)",
                 pal["success"],
                 list(profile.allowed_domains),
                 is_domain=True,
@@ -3238,7 +3241,7 @@ class TkinterUI:
             _make_section(
                 websites_frame,
                 "borderline_domains",
-                "BORDERLINE WEBSITES (Inspect Title / Screen)",
+                "Borderline websites (inspect title / screen)",
                 pal["warning"],
                 list(profile.borderline_domains),
                 is_domain=True,
@@ -3247,7 +3250,7 @@ class TkinterUI:
             _make_section(
                 websites_frame,
                 "blocked_domains",
-                "BLOCKED WEBSITES (Instant Distraction)",
+                "Blocked websites (instant distraction)",
                 pal["danger"],
                 list(profile.blocked_domains),
                 is_domain=True,
@@ -3257,7 +3260,7 @@ class TkinterUI:
             _make_section(
                 apps_frame,
                 "allowed_apps",
-                "ALLOWED DESKTOP APPS (e.g. code.exe)",
+                "Allowed desktop apps (e.g. code.exe)",
                 pal["success"],
                 list(profile.allowed_apps),
                 is_domain=False,
@@ -3266,7 +3269,7 @@ class TkinterUI:
             _make_section(
                 apps_frame,
                 "blocked_apps",
-                "BLOCKED DESKTOP APPS (e.g. spotify.exe)",
+                "Blocked desktop apps (e.g. spotify.exe)",
                 pal["danger"],
                 list(profile.blocked_apps),
                 is_domain=False,
@@ -3279,23 +3282,23 @@ class TkinterUI:
                 if which == "apps":
                     websites_frame.pack_forget()
                     apps_frame.pack(fill="both", expand=True)
-                    tab_web_btn.configure(bg=pal["btn_secondary_bg"], fg=pal["text_secondary"])
-                    tab_app_btn.configure(bg=pal["primary"], fg="#FFFFFF")
+                    _set_button_variant(tab_web_btn, "secondary", palette=pal)
+                    _set_button_variant(tab_app_btn, "primary", palette=pal)
                 else:
                     apps_frame.pack_forget()
                     websites_frame.pack(fill="both", expand=True)
-                    tab_web_btn.configure(bg=pal["primary"], fg="#FFFFFF")
-                    tab_app_btn.configure(bg=pal["btn_secondary_bg"], fg=pal["text_secondary"])
+                    _set_button_variant(tab_web_btn, "primary", palette=pal)
+                    _set_button_variant(tab_app_btn, "secondary", palette=pal)
 
             tab_web_btn = _make_button(
                 tab_bar,
                 text="Websites",
                 command=lambda: _show_tab("websites"),
                 variant="primary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=14,
                 pady=5,
-                bind_hover=False,
+                height=30,
                 palette=pal,
             )
             tab_web_btn.pack(side="left", padx=(0, 6))
@@ -3305,20 +3308,20 @@ class TkinterUI:
                 text="Desktop Apps",
                 command=lambda: _show_tab("apps"),
                 variant="secondary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=14,
                 pady=5,
-                bind_hover=False,
+                height=30,
                 palette=pal,
             )
             tab_app_btn.pack(side="left")
 
-            ai_suggest_btn: tk.Button | None = None
+            ai_suggest_btn: Any = None
             if on_ai_suggest is not None:
                 def _handle_ai_suggest() -> None:
                     if ai_suggest_btn is not None and ai_suggest_btn.winfo_exists():
                         ai_suggest_btn.configure(state="disabled", text="Suggesting...")
-                    status_note.configure(text="Generating AI rule suggestions...", fg=pal["primary"])
+                    status_note.configure(text="Generating AI rule suggestions...", text_color=pal["primary"])
 
                     def _on_suggested(suggested: GoalProfile) -> None:
                         def _apply_ui() -> None:
@@ -3345,7 +3348,7 @@ class TkinterUI:
                                 ai_suggest_btn.configure(state="normal", text="✨ AI Suggest Rules")
                             status_note.configure(
                                 text="AI suggestions applied — review and click Save Rules.",
-                                fg=pal["success"],
+                                text_color=pal["success"],
                             )
 
                         self.dispatch(_apply_ui)
@@ -3357,9 +3360,10 @@ class TkinterUI:
                     text="✨ AI Suggest Rules",
                     command=_handle_ai_suggest,
                     variant="secondary",
-                    font=("Segoe UI", 8, "bold"),
-                    padx=10,
+                    font=ui_font(10, "bold"),
+                    padx=12,
                     pady=5,
+                    height=30,
                     palette=pal,
                 )
                 ai_suggest_btn.pack(side="right")
@@ -3394,9 +3398,10 @@ class TkinterUI:
                 text="Cancel",
                 command=_close,
                 variant="secondary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=14,
                 pady=6,
+                height=34,
                 palette=pal,
             ).pack(side="left")
 
@@ -3405,9 +3410,10 @@ class TkinterUI:
                 text="Save Rules",
                 command=_save,
                 variant="primary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=16,
                 pady=6,
+                height=34,
                 palette=pal,
             )
             save_btn.pack(side="right")
@@ -3484,86 +3490,90 @@ class TkinterUI:
         mins_str = f"{kpis.focused_minutes:.1f}m" if kpis.focused_minutes < 10 else f"{int(round(kpis.focused_minutes))}m"
 
         metrics = [
-            ("FOCUS SCORE", f"{score}%", score_color),
-            ("FOCUSED TIME", mins_str, pal["primary"]),
-            ("DISTRACTIONS", str(kpis.distractions_count), pal["danger"] if kpis.distractions_count > 0 else pal["text"]),
-            ("OVERRIDES", str(kpis.overrides_count), pal["text"]),
+            ("Focus score", f"{score}%", score_color),
+            ("Focused time", mins_str, pal["primary"]),
+            ("Distractions", str(kpis.distractions_count), pal["danger"] if kpis.distractions_count > 0 else pal["text"]),
+            ("Overrides", str(kpis.overrides_count), pal["text"]),
         ]
         for idx, (label, val, accent) in enumerate(metrics):
-            holder.columnconfigure(idx, weight=1)
-            card = tk.Frame(
+            holder.columnconfigure(idx, weight=1, uniform="kpi")
+            card = SurfaceCard(
                 holder,
-                bg=pal["surface"],
-                padx=12,
-                pady=8,
-                highlightthickness=1,
-                highlightbackground=pal["border_strong"],
+                palette=pal,
+                fg_color=pal["surface"],
+                border_color=pal["border"],
+                corner_radius=10,
+                border_width=1,
             )
-            card.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 6, 0))
-            tk.Label(
-                card,
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 8, 0))
+            inner = ctk.CTkFrame(card, fg_color="transparent")
+            inner.pack(fill="both", expand=True, padx=14, pady=10)
+            ModernLabel(
+                inner,
                 text=label,
-                font=("Segoe UI", 7, "bold"),
-                bg=pal["surface"],
-                fg=pal["text_muted"],
+                font=ui_font(10, "bold"),
+                text_color=pal["text_muted"],
             ).pack(anchor="w")
-            tk.Label(
-                card,
+            ModernLabel(
+                inner,
                 text=val,
-                font=("Segoe UI", 14, "bold"),
-                bg=pal["surface"],
-                fg=accent,
+                font=ui_font(19, "bold", display=True),
+                text_color=accent,
             ).pack(anchor="w", pady=(2, 0))
 
     def _populate_review_vault(self, holder: tk.Frame, closed_tabs: list[ClosedTabEntry]) -> None:
         for child in holder.winfo_children():
             child.destroy()
-        self._review_vault_reopen_btns: list[tk.Button] = []
-        self._review_vault_toggle_btn: tk.Button | None = None
-        self._review_vault_reopen_all_btn: tk.Button | None = None
+        self._review_vault_reopen_btns: list[Any] = []
+        self._review_vault_toggle_btn: Any = None
+        self._review_vault_reopen_all_btn: Any = None
 
         if not closed_tabs:
             holder.pack_forget()
             return
 
         pal = self._active_palette()
-        bar = tk.Frame(
+        bar = SurfaceCard(
             holder,
-            bg=pal["surface"],
-            padx=10,
-            pady=6,
-            highlightthickness=1,
-            highlightbackground=pal["border_strong"],
+            palette=pal,
+            fg_color=pal["surface"],
+            border_color=pal["border"],
+            corner_radius=RADII["md"],
+            border_width=1,
         )
         bar.pack(fill="x")
 
-        items_frame = tk.Frame(
+        bar_in = ctk.CTkFrame(bar, fg_color="transparent")
+        bar_in.pack(fill="x", padx=12, pady=6)
+
+        items_frame = SurfaceCard(
             holder,
-            bg=pal["surface_alt"],
-            padx=10,
-            pady=6,
-            highlightthickness=1,
-            highlightbackground=pal["border"],
+            palette=pal,
+            fg_color=pal["surface_alt"],
+            border_color=pal["border"],
+            corner_radius=RADII["md"],
+            border_width=1,
         )
         expanded = {"open": False}
 
         def _toggle_vault() -> None:
             expanded["open"] = not expanded["open"]
             if expanded["open"]:
-                items_frame.pack(fill="x", pady=(2, 0))
+                items_frame.pack(fill="x", pady=(4, 0))
                 toggle_btn.configure(text=f"▾ Closed Tabs Vault ({len(closed_tabs)})")
             else:
                 items_frame.pack_forget()
                 toggle_btn.configure(text=f"▸ Closed Tabs Vault ({len(closed_tabs)})")
 
         toggle_btn = _make_button(
-            bar,
+            bar_in,
             text=f"▸ Closed Tabs Vault ({len(closed_tabs)})",
             command=_toggle_vault,
             variant="ghost",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=6,
             pady=2,
+            height=26,
             palette=pal,
         )
         toggle_btn.pack(side="left")
@@ -3578,30 +3588,30 @@ class TkinterUI:
                         logger.exception("Failed reopening URL %s", entry.url)
 
         reopen_all_btn = _make_button(
-            bar,
+            bar_in,
             text="Reopen All",
             command=_reopen_all,
             variant="secondary",
-            font=("Segoe UI", 8, "bold"),
-            padx=8,
+            font=ui_font(10, "bold"),
+            padx=10,
             pady=3,
+            height=26,
             palette=pal,
         )
         reopen_all_btn.pack(side="right")
         self._review_vault_reopen_all_btn = reopen_all_btn
 
         for entry in closed_tabs[:12]:
-            row = tk.Frame(items_frame, bg=pal["surface_alt"], pady=2)
-            row.pack(fill="x")
+            row = ctk.CTkFrame(items_frame, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=4)
             label_str = entry.title or entry.domain or entry.url
             if len(label_str) > 54:
                 label_str = label_str[:51] + "..."
-            tk.Label(
+            ModernLabel(
                 row,
                 text=f"{label_str}  ({entry.domain})",
-                font=("Segoe UI", 8),
-                bg=pal["surface_alt"],
-                fg=pal["text_secondary"],
+                font=ui_font(10),
+                text_color=pal["text_secondary"],
                 anchor="w",
             ).pack(side="left", fill="x", expand=True)
 
@@ -3610,9 +3620,10 @@ class TkinterUI:
                 text="Reopen",
                 command=lambda u=entry.url: self._url_opener(u),
                 variant="secondary",
-                font=("Segoe UI", 8, "bold"),
-                padx=8,
+                font=ui_font(10, "bold"),
+                padx=10,
                 pady=2,
+                height=24,
                 palette=pal,
             )
             r_btn.pack(side="right", padx=(6, 0))
@@ -3679,7 +3690,7 @@ class TkinterUI:
                 )
             if self._review_progress_bar is not None and self._review_progress_bar.winfo_exists():
                 if is_loading:
-                    self._review_progress_bar.start(12)
+                    self._review_progress_bar.start()
                 else:
                     self._review_progress_bar.stop()
                     self._review_progress_bar.destroy()
@@ -3723,70 +3734,70 @@ class TkinterUI:
             except Exception:
                 logger.exception("Failed to raise review window")
 
-        frame = tk.Frame(self.root, bg=pal["bg"], padx=22, pady=18)
+        frame = tk.Frame(self.root, bg=pal["bg"], padx=24, pady=20)
         frame.pack(fill="both", expand=True)
         self._current_frame = frame
 
         # Header row + theme toggle
-        hdr_row = tk.Frame(frame, bg=pal["bg"])
-        hdr_row.pack(fill="x", pady=(0, 3))
+        hdr_row = ctk.CTkFrame(frame, fg_color="transparent")
+        hdr_row.pack(fill="x", pady=(0, 4))
 
-        tk.Label(
+        ModernLabel(
             hdr_row,
             text="Focus Session Review",
-            font=("Segoe UI", 16, "bold"),
-            bg=pal["bg"],
-            fg=pal["text"],
+            font=ui_font(19, "bold", display=True),
+            text_color=pal["text"],
         ).pack(side="left")
 
         theme_lbl = "Light" if self._theme == "dark" else "Dark"
-        self._theme_btn = _make_button(
+        self._theme_btn = _make_button(  # type: ignore[assignment]
             hdr_row,
             text=theme_lbl,
             command=self.toggle_theme,
-            variant="secondary",
-            font=("Segoe UI", 8, "bold"),
+            variant="ghost",
+            font=ui_font(10, "bold"),
             padx=10,
-            pady=3,
+            pady=4,
+            height=28,
             palette=pal,
         )
         self._theme_btn.pack(side="right")
 
-        sub_lbl = tk.Label(
+        sub_lbl = ModernLabel(
             frame,
             text=(
                 "Compiling your focus metrics and session summary..."
                 if is_loading
                 else "Here is your focus summary, highlights, and model breakdown:"
             ),
-            font=("Segoe UI", 9),
-            bg=pal["bg"],
-            fg=pal["text_secondary"],
+            font=ui_font(11),
+            text_color=pal["text_secondary"],
+            anchor="w",
         )
-        sub_lbl.pack(anchor="w", pady=(0, 8))
-        self._review_sub_label = sub_lbl
+        sub_lbl.pack(anchor="w", pady=(0, 12))
+        self._review_sub_label = sub_lbl  # type: ignore[assignment]
 
         if is_loading:
-            pbar = ttk.Progressbar(frame, mode="indeterminate", style="Brand.Horizontal.TProgressbar")
-            pbar.pack(fill="x", pady=(0, 10))
-            pbar.start(12)
-            self._review_progress_bar = pbar
+            pbar = ModernProgressBar(frame, palette=pal, height=5, mode="indeterminate")
+            pbar.pack(fill="x", pady=(0, 12))
+            pbar.start()
+            self._review_progress_bar = pbar  # type: ignore[assignment]
 
         # KPI Summary Strip
         kpi_holder = tk.Frame(frame, bg=pal["bg"])
         self._review_kpi_holder = kpi_holder
         if self._review_kpis is not None:
-            kpi_holder.pack(fill="x", pady=(0, 10))
+            kpi_holder.pack(fill="x", pady=(0, 12))
             self._populate_review_kpis(kpi_holder, self._review_kpis)
 
         # Footer buttons packed side="bottom" first so they can NEVER be pushed off-screen
-        btn_row = tk.Frame(frame, bg=pal["bg"])
-        btn_row.pack(fill="x", side="bottom", pady=(12, 0))
+        btn_row = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_row.pack(fill="x", side="bottom", pady=(14, 0))
 
         vault_holder = tk.Frame(frame, bg=pal["bg"])
         self._review_vault_holder = vault_holder
         if self._review_closed_tabs:
-            vault_holder.pack(fill="x", side="bottom", pady=(8, 0))
+            vault_holder.pack(fill="x", side="bottom", pady=(10, 0))
             self._populate_review_vault(vault_holder, self._review_closed_tabs)
 
         self._review_raw_text = review_text
@@ -3808,13 +3819,14 @@ class TkinterUI:
             text="Copy Summary",
             command=_handle_copy,
             variant="secondary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=14,
             pady=7,
+            height=34,
             palette=pal,
         )
         copy_btn.pack(side="left")
-        self._review_copy_btn = copy_btn
+        self._review_copy_btn = copy_btn  # type: ignore[assignment]
 
         def _handle_export_md() -> None:
             try:
@@ -3866,22 +3878,24 @@ class TkinterUI:
             text="Save .md",
             command=_handle_export_md,
             variant="secondary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=12,
             pady=7,
+            height=34,
             palette=pal,
         )
         export_btn.pack(side="left", padx=(8, 0))
-        self._review_export_btn = export_btn
+        self._review_export_btn = export_btn  # type: ignore[assignment]
 
         close_btn = _make_button(
             btn_row,
             text="Done / Close",
             command=on_close,
             variant="primary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=16,
             pady=7,
+            height=34,
             palette=pal,
         )
         close_btn.pack(side="right")
@@ -3892,9 +3906,10 @@ class TkinterUI:
                 text="New Session",
                 command=on_new_session,
                 variant="secondary",
-                font=("Segoe UI", 9, "bold"),
+                font=ui_font(11, "bold"),
                 padx=14,
                 pady=7,
+                height=34,
                 palette=pal,
             )
             new_btn.pack(side="right", padx=(0, 8))
@@ -3903,9 +3918,9 @@ class TkinterUI:
         txt = scrolledtext.ScrolledText(
             frame,
             wrap="word",
-            width=64,
-            height=14,
-            font=("Consolas" if "```" in review_text else "Segoe UI", 10),
+            width=66,
+            height=15,
+            font=mono_font(10) if "```" in review_text else ui_font(11),
             bg=pal["surface"],
             fg=pal["text"],
             insertbackground=pal["text"],
@@ -3913,21 +3928,23 @@ class TkinterUI:
             bd=0,
             highlightthickness=1,
             highlightbackground=pal["border_strong"],
-            padx=14,
-            pady=12,
-            spacing2=2,
+            padx=20,
+            pady=16,
+            spacing1=3,
+            spacing2=4,
+            spacing3=3,
         )
         txt.pack(fill="both", expand=True)
-        txt.tag_configure("h1", font=("Segoe UI", 13, "bold"), foreground=pal["h1"], spacing1=8, spacing3=4)
-        txt.tag_configure("h2", font=("Segoe UI", 11, "bold"), foreground=pal["h2"], spacing1=8, spacing3=3)
-        txt.tag_configure("h3", font=("Segoe UI", 10, "bold"), foreground=pal["text"], spacing1=6, spacing3=2)
-        txt.tag_configure("bold", font=("Segoe UI", 10, "bold"), foreground=pal["text"])
-        txt.tag_configure("bullet", lmargin1=14, lmargin2=28, spacing1=2)
+        txt.tag_configure("h1", font=ui_font(15, "bold", display=True), foreground=pal["h1"], spacing1=10, spacing3=5)
+        txt.tag_configure("h2", font=ui_font(12, "bold", display=True), foreground=pal["h2"], spacing1=10, spacing3=4)
+        txt.tag_configure("h3", font=ui_font(11, "bold"), foreground=pal["text"], spacing1=7, spacing3=3)
+        txt.tag_configure("bold", font=ui_font(11, "bold"), foreground=pal["text"])
+        txt.tag_configure("bullet", lmargin1=16, lmargin2=30, spacing1=3, spacing3=2)
 
         self._render_markdown_into_text(txt, review_text)
         self._review_text_widget = txt
 
-        self._fit_window(self.root, min_w=620, min_h=500, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+        self._fit_window(self.root, min_w=660, min_h=540, pos="center", pad_w=12, pad_h=12, allow_resize=True)
 
         if not was_withdrawn:
             def _clear_topmost() -> None:

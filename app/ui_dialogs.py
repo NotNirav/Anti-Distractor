@@ -12,9 +12,25 @@ from tkinter import ttk
 from typing import Any, Callable
 import webbrowser
 
+import customtkinter as ctk
+
 from app.models import ActivityFeedItem
 from app.settings import AppSettings
-from app.win32_ui import apply_brand_icon, apply_dark_titlebar, apply_noactivate_topmost
+from app.theme import (
+    RADII,
+    ModernEntry,
+    ModernLabel,
+    StatusPill,
+    SurfaceCard,
+    mono_font,
+    ui_font,
+)
+from app.win32_ui import (
+    apply_brand_icon,
+    apply_dark_titlebar,
+    apply_noactivate_topmost,
+    apply_rounded_corners,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,20 +125,20 @@ class ToolTip:
             tip = tk.Toplevel(self.widget)
             tip.overrideredirect(True)
             tip.attributes("-topmost", True)
-            tip.configure(bg="#0F172A")
+            tip.configure(bg="#09090B")
 
             lbl = tk.Label(
                 tip,
                 text=msg,
-                font=("Segoe UI", 8),
-                bg="#0F172A",
-                fg="#F8FAFC",
-                padx=8,
-                pady=4,
+                font=ui_font(10),
+                bg="#09090B",
+                fg="#FAFAFA",
+                padx=10,
+                pady=5,
                 justify="left",
                 wraplength=320,
                 highlightthickness=1,
-                highlightbackground="#334155",
+                highlightbackground="#27272A",
             )
             lbl.pack()
             tip.update_idletasks()
@@ -136,6 +152,7 @@ class ToolTip:
             cx = max(vx + 4, min(vx + vw - tw - 4, wx))
             cy = max(vy + 4, min(vy + vh - th - 4, wy))
             tip.geometry(f"{tw}x{th}+{cx}+{cy}")
+            apply_rounded_corners(tip, small=True)
             apply_noactivate_topmost(tip)
             self._tip_win = tip
             return tip
@@ -189,87 +206,64 @@ class ActivityDrawerDialog:
         apply_dark_titlebar(win, dark)
         self.win = win
 
-        outer = tk.Frame(win, bg=palette["bg"], padx=16, pady=14)
+        outer = tk.Frame(win, bg=palette["bg"], padx=20, pady=16)
         outer.pack(fill="both", expand=True)
 
-        hdr = tk.Frame(outer, bg=palette["bg"])
-        hdr.pack(fill="x", pady=(0, 8))
+        hdr = ctk.CTkFrame(outer, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 4))
 
-        tk.Label(
+        ModernLabel(
             hdr,
             text="Live Activity & Explainability",
-            font=("Segoe UI", 13, "bold"),
-            bg=palette["bg"],
-            fg=palette["text"],
+            font=ui_font(16, "bold", display=True),
+            text_color=palette["text"],
         ).pack(side="left")
 
-        tk.Label(
+        ModernLabel(
             outer,
             text="Recent checks (newest first) — inspect why an app or tab was passed or flagged.",
-            font=("Segoe UI", 9),
-            bg=palette["bg"],
-            fg=palette["text_secondary"],
+            font=ui_font(11),
+            text_color=palette["text_secondary"],
             anchor="w",
-        ).pack(fill="x", pady=(0, 10))
+        ).pack(fill="x", pady=(0, 12))
 
-        footer = tk.Frame(outer, bg=palette["bg"])
-        footer.pack(fill="x", side="bottom", pady=(10, 0))
+        footer = ctk.CTkFrame(outer, fg_color="transparent")
+        footer.pack(fill="x", side="bottom", pady=(12, 0))
         self._make_btn(
             footer,
             text="Close",
             command=self.close,
             variant="secondary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=14,
             pady=6,
             palette=palette,
         ).pack(side="right")
 
         # Scrollable feed container
-        container = tk.Frame(
+        container = SurfaceCard(
             outer,
-            bg=palette["surface"],
-            highlightthickness=1,
-            highlightbackground=palette["border_strong"],
+            palette=palette,
+            fg_color=palette["surface"],
+            border_color=palette["border_strong"],
+            corner_radius=RADII["lg"],
+            border_width=1,
         )
         container.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(
+        scroll_host = ctk.CTkScrollableFrame(
             container,
-            bg=palette["surface"],
-            highlightthickness=0,
-            bd=0,
+            fg_color="transparent",
+            corner_radius=RADII["md"],
         )
-        scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        self._rows_frame = tk.Frame(canvas, bg=palette["surface"], padx=10, pady=8)
-
-        self._rows_window_id = canvas.create_window((0, 0), window=self._rows_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        def _on_frame_cfg(_e: tk.Event) -> None:
-            try:
-                canvas.configure(scrollregion=canvas.bbox("all"))
-            except Exception:
-                pass
-
-        def _on_canvas_cfg(event: tk.Event) -> None:
-            try:
-                canvas.itemconfigure(self._rows_window_id, width=event.width)
-            except Exception:
-                pass
-
-        self._rows_frame.bind("<Configure>", _on_frame_cfg)
-        canvas.bind("<Configure>", _on_canvas_cfg)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        self._canvas = canvas
+        scroll_host.pack(fill="both", expand=True, padx=6, pady=6)
+        self._rows_frame = scroll_host
 
         self.refresh(items)
 
         win.bind("<Escape>", lambda _e: self.close())
         win.protocol("WM_DELETE_WINDOW", self.close)
-        self._fit(win, min_w=560, min_h=440, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+        self._fit(win, min_w=580, min_h=450, pos="center", pad_w=12, pad_h=12, allow_resize=True)
         apply_dark_titlebar(win, dark)
 
     def refresh(self, items: list[ActivityFeedItem]) -> None:
@@ -286,88 +280,87 @@ class ActivityDrawerDialog:
 
         recent = list(reversed(items[-15:]))
         if not recent:
-            tk.Label(
+            ModernLabel(
                 self._rows_frame,
                 text="No evaluations recorded in this session yet.",
-                font=("Segoe UI", 9),
-                bg=pal["surface"],
-                fg=pal["text_muted"],
-                pady=20,
-            ).pack(fill="x")
+                font=ui_font(11),
+                text_color=pal["text_muted"],
+            ).pack(fill="x", pady=24)
             return
 
         for item in recent:
-            row = tk.Frame(
+            row = SurfaceCard(
                 self._rows_frame,
-                bg=pal["surface_alt"],
-                padx=10,
-                pady=8,
-                highlightthickness=1,
-                highlightbackground=pal["border"],
+                palette=pal,
+                fg_color=pal["surface_alt"],
+                border_color=pal["border"],
+                corner_radius=RADII["md"],
+                border_width=1,
             )
-            row.pack(fill="x", pady=(0, 6))
+            row.pack(fill="x", pady=(0, 8), padx=4)
 
-            top = tk.Frame(row, bg=pal["surface_alt"])
+            row_in = ctk.CTkFrame(row, fg_color="transparent")
+            row_in.pack(fill="x", padx=12, pady=10)
+
+            top = ctk.CTkFrame(row_in, fg_color="transparent")
             top.pack(fill="x")
 
             ts_str = time.strftime("%H:%M:%S", time.localtime(item.timestamp or time.time()))
-            tk.Label(
+            ModernLabel(
                 top,
                 text=ts_str,
-                font=("Consolas", 8),
-                bg=pal["surface_alt"],
-                fg=pal["text_muted"],
-            ).pack(side="left", padx=(0, 6))
+                font=mono_font(10),
+                text_color=pal["text_muted"],
+            ).pack(side="left", padx=(0, 8))
 
             if item.overridden:
-                badge_txt, badge_bg, badge_fg = " OVERRIDDEN ", pal["success_soft"], pal["success"]
+                badge_txt, badge_bg, badge_fg, badge_bd = "Overridden", pal["success_soft"], pal["success"], pal["success_border"]
             elif item.on_task:
-                badge_txt, badge_bg, badge_fg = " ON-TASK ", pal["success_soft"], pal["success"]
+                badge_txt, badge_bg, badge_fg, badge_bd = "On-task", pal["success_soft"], pal["success"], pal["success_border"]
             else:
-                badge_txt, badge_bg, badge_fg = " FLAGGED ", pal["danger_soft"], pal["danger"]
+                badge_txt, badge_bg, badge_fg, badge_bd = "Flagged", pal["danger_soft"], pal["danger"], pal["danger_border"]
 
-            tk.Label(
+            StatusPill(
                 top,
                 text=badge_txt,
-                font=("Segoe UI", 7, "bold"),
                 bg=badge_bg,
                 fg=badge_fg,
-                padx=4,
+                border=badge_bd,
+                dot_color=badge_fg,
+                font=ui_font(9, "bold"),
+                padx=7,
                 pady=1,
-            ).pack(side="left", padx=(0, 6))
+            ).pack(side="left", padx=(0, 8))
 
             src_display = item.source_key or item.title or "Activity"
             if len(src_display) > 34:
                 src_display = src_display[:31] + "..."
-            tk.Label(
+            ModernLabel(
                 top,
                 text=src_display,
-                font=("Segoe UI", 9, "bold"),
-                bg=pal["surface_alt"],
-                fg=pal["text"],
+                font=ui_font(11, "bold"),
+                text_color=pal["text"],
             ).pack(side="left")
 
             model_short = item.model_used or ("Rules" if item.tier_used == 0 else f"Tier {item.tier_used}")
             conf_pct = int(round(max(0.0, min(1.0, float(item.confidence))) * 100))
             tier_txt = f"T{item.tier_used} · {model_short} · {conf_pct}%"
-            tk.Label(
+            ModernLabel(
                 top,
                 text=tier_txt,
-                font=("Segoe UI", 8),
-                bg=pal["surface_alt"],
-                fg=pal["text_muted"],
+                font=mono_font(9),
+                text_color=pal["text_muted"],
             ).pack(side="right")
 
-            bottom = tk.Frame(row, bg=pal["surface_alt"])
-            bottom.pack(fill="x", pady=(4, 0))
+            bottom = ctk.CTkFrame(row_in, fg_color="transparent")
+            bottom.pack(fill="x", pady=(6, 0))
 
             reason_txt = item.reason or ("On-task" if item.on_task else "Off-task detected")
-            tk.Label(
+            ModernLabel(
                 bottom,
                 text=reason_txt,
-                font=("Segoe UI", 8),
-                bg=pal["surface_alt"],
-                fg=pal["text_secondary"],
+                font=ui_font(10),
+                text_color=pal["text_secondary"],
                 wraplength=self._s(370),
                 justify="left",
                 anchor="w",
@@ -380,8 +373,8 @@ class ActivityDrawerDialog:
                     text="Mark Relevant / Allow",
                     command=lambda it=item: cb(it),
                     variant="secondary",
-                    font=("Segoe UI", 8, "bold"),
-                    padx=8,
+                    font=ui_font(10, "bold"),
+                    padx=10,
                     pady=3,
                     palette=pal,
                 )
@@ -438,24 +431,22 @@ class HistoryAnalyticsDialog:
         apply_dark_titlebar(win, dark)
         self.win = win
 
-        outer = tk.Frame(win, bg=palette["bg"], padx=18, pady=14)
+        outer = tk.Frame(win, bg=palette["bg"], padx=20, pady=16)
         outer.pack(fill="both", expand=True)
 
-        tk.Label(
+        ModernLabel(
             outer,
-            text="Session History & Focus Analytics",
-            font=("Segoe UI", 14, "bold"),
-            bg=palette["bg"],
-            fg=palette["text"],
+            text="Session History & Focus Stats",
+            font=ui_font(17, "bold", display=True),
+            text_color=palette["text"],
         ).pack(anchor="w")
 
-        tk.Label(
+        ModernLabel(
             outer,
             text="Track your daily streak, deep-work hours, top distractions, and past reviews.",
-            font=("Segoe UI", 9),
-            bg=palette["bg"],
-            fg=palette["text_secondary"],
-        ).pack(anchor="w", pady=(2, 10))
+            font=ui_font(11),
+            text_color=palette["text_secondary"],
+        ).pack(anchor="w", pady=(2, 12))
 
         # 4 KPI cards
         kpi_row = tk.Frame(outer, bg=palette["bg"])
@@ -467,55 +458,57 @@ class HistoryAnalyticsDialog:
         avg_score = int(stats.get("avg_focus_score_pct", 0))
 
         cards = [
-            ("streak", "DAILY STREAK", f"{streak_days}d", palette["primary"]),
-            ("hours", "DEEP-WORK HOURS", f"{total_hours:.1f}h", palette["success"]),
-            ("sessions", "SESSIONS", f"{completed_cnt}", palette["text"]),
-            ("avg_focus", "AVG FOCUS", f"{avg_score}%", palette["success"] if avg_score >= 75 else palette["warning"]),
+            ("streak", "Daily streak", f"{streak_days}d", palette["primary"]),
+            ("hours", "Deep-work hours", f"{total_hours:.1f}h", palette["success"]),
+            ("sessions", "Sessions", f"{completed_cnt}", palette["text"]),
+            ("avg_focus", "Avg focus", f"{avg_score}%", palette["success"] if avg_score >= 75 else palette["warning"]),
         ]
         for idx, (key, title, val, accent) in enumerate(cards):
-            kpi_row.columnconfigure(idx, weight=1)
-            c = tk.Frame(
+            kpi_row.columnconfigure(idx, weight=1, uniform="hist_kpi")
+            c = SurfaceCard(
                 kpi_row,
-                bg=palette["surface"],
-                padx=12,
-                pady=8,
-                highlightthickness=1,
-                highlightbackground=palette["border_strong"],
+                palette=palette,
+                fg_color=palette["surface"],
+                border_color=palette["border"],
+                corner_radius=10,
+                border_width=1,
             )
-            c.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 6, 0))
-            tk.Label(
-                c,
+            c.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 8, 0))
+            c_in = ctk.CTkFrame(c, fg_color="transparent")
+            c_in.pack(fill="both", expand=True, padx=14, pady=10)
+            ModernLabel(
+                c_in,
                 text=title,
-                font=("Segoe UI", 7, "bold"),
-                bg=palette["surface"],
-                fg=palette["text_muted"],
+                font=ui_font(10, "bold"),
+                text_color=palette["text_muted"],
             ).pack(anchor="w")
-            val_lbl = tk.Label(
-                c,
+            val_lbl = ModernLabel(
+                c_in,
                 text=val,
-                font=("Segoe UI", 14, "bold"),
-                bg=palette["surface"],
-                fg=accent,
+                font=ui_font(19, "bold", display=True),
+                text_color=accent,
             )
             val_lbl.pack(anchor="w", pady=(2, 0))
-            self.stat_labels[key] = val_lbl
+            self.stat_labels[key] = val_lbl  # type: ignore[assignment]
 
         # Top distractions strip
-        dist_card = tk.Frame(
+        dist_card = SurfaceCard(
             outer,
-            bg=palette["surface"],
-            padx=12,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground=palette["border"],
+            palette=palette,
+            fg_color=palette["surface"],
+            border_color=palette["border"],
+            corner_radius=10,
+            border_width=1,
         )
         dist_card.pack(fill="x", pady=(0, 10))
-        tk.Label(
-            dist_card,
-            text="TOP DISTRACTING SITES / APPS",
-            font=("Segoe UI", 7, "bold"),
-            bg=palette["surface"],
-            fg=palette["text_muted"],
+        dist_in = ctk.CTkFrame(dist_card, fg_color="transparent")
+        dist_in.pack(fill="x", padx=14, pady=10)
+
+        ModernLabel(
+            dist_in,
+            text="Top distracting sites / apps",
+            font=ui_font(10, "bold"),
+            text_color=palette["text_muted"],
         ).pack(anchor="w")
 
         top_dist: list[tuple[str, int]] = list(stats.get("top_distractions", []))
@@ -523,28 +516,27 @@ class HistoryAnalyticsDialog:
             dist_text = "   ·   ".join(f"{name} ({cnt})" for name, cnt in top_dist[:5])
         else:
             dist_text = "No distractions logged yet — clean sheet!"
-        self.top_distractions_label = tk.Label(
-            dist_card,
+        self.top_distractions_label = ModernLabel(
+            dist_in,
             text=dist_text,
-            font=("Segoe UI", 9, "bold" if top_dist else "normal"),
-            bg=palette["surface"],
-            fg=palette["danger"] if top_dist else palette["text_secondary"],
+            font=ui_font(11, "bold" if top_dist else "normal"),
+            text_color=palette["danger"] if top_dist else palette["text_secondary"],
             anchor="w",
             wraplength=self._s(540),
             justify="left",
         )
-        self.top_distractions_label.pack(anchor="w", pady=(2, 0))
+        self.top_distractions_label.pack(anchor="w", pady=(3, 0))
 
         # Footer buttons packed before expandable list so they never clip
-        footer = tk.Frame(outer, bg=palette["bg"])
-        footer.pack(fill="x", side="bottom", pady=(10, 0))
+        footer = ctk.CTkFrame(outer, fg_color="transparent")
+        footer.pack(fill="x", side="bottom", pady=(12, 0))
 
         self._make_btn(
             footer,
             text="Close",
             command=self.close,
             variant="secondary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=14,
             pady=6,
             palette=palette,
@@ -555,7 +547,7 @@ class HistoryAnalyticsDialog:
             text="Repeat Goal",
             command=self._handle_repeat,
             variant="primary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=14,
             pady=6,
             palette=palette,
@@ -567,7 +559,7 @@ class HistoryAnalyticsDialog:
             text="Read Review",
             command=self._handle_read_review,
             variant="secondary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=14,
             pady=6,
             palette=palette,
@@ -575,31 +567,33 @@ class HistoryAnalyticsDialog:
         self.read_btn.pack(side="right", padx=(0, 8))
 
         # Past sessions list
-        list_card = tk.Frame(
+        list_card = SurfaceCard(
             outer,
-            bg=palette["surface"],
-            padx=10,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground=palette["border_strong"],
+            palette=palette,
+            fg_color=palette["surface"],
+            border_color=palette["border_strong"],
+            corner_radius=RADII["lg"],
+            border_width=1,
         )
         list_card.pack(fill="both", expand=True)
 
-        tk.Label(
-            list_card,
-            text="PAST SESSIONS",
-            font=("Segoe UI", 8, "bold"),
-            bg=palette["surface"],
-            fg=palette["text_muted"],
-        ).pack(anchor="w", pady=(0, 4))
+        list_in = ctk.CTkFrame(list_card, fg_color="transparent")
+        list_in.pack(fill="both", expand=True, padx=14, pady=12)
 
-        lb_wrap = tk.Frame(list_card, bg=palette["surface"])
+        ModernLabel(
+            list_in,
+            text="Past sessions",
+            font=ui_font(10, "bold"),
+            text_color=palette["text_muted"],
+        ).pack(anchor="w", pady=(0, 6))
+
+        lb_wrap = tk.Frame(list_in, bg=palette["surface"])
         lb_wrap.pack(fill="both", expand=True)
 
         lb = tk.Listbox(
             lb_wrap,
             height=8,
-            font=("Segoe UI", 9),
+            font=ui_font(10),
             bg=palette["surface_alt"],
             fg=palette["text"],
             selectbackground=palette["primary"],
@@ -635,7 +629,7 @@ class HistoryAnalyticsDialog:
 
         win.bind("<Escape>", lambda _e: self.close())
         win.protocol("WM_DELETE_WINDOW", self.close)
-        self._fit(win, min_w=600, min_h=480, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+        self._fit(win, min_w=640, min_h=500, pos="center", pad_w=12, pad_h=12, allow_resize=True)
         apply_dark_titlebar(win, dark)
 
     def _selected_session(self) -> dict[str, Any] | None:
@@ -716,26 +710,24 @@ class SettingsDialog:
         apply_dark_titlebar(win, dark)
         self.win = win
 
-        outer = tk.Frame(win, bg=palette["bg"], padx=18, pady=14)
+        outer = tk.Frame(win, bg=palette["bg"], padx=20, pady=16)
         outer.pack(fill="both", expand=True)
 
-        tk.Label(
+        ModernLabel(
             outer,
             text="Preferences & API Configuration",
-            font=("Segoe UI", 14, "bold"),
-            bg=palette["bg"],
-            fg=palette["text"],
+            font=ui_font(17, "bold", display=True),
+            text_color=palette["text"],
         ).pack(anchor="w")
 
-        tk.Label(
+        ModernLabel(
             outer,
             text="Customize break durations, detection timings, global shortcuts, and your Gemini API key.",
-            font=("Segoe UI", 9),
-            bg=palette["bg"],
-            fg=palette["text_secondary"],
-        ).pack(anchor="w", pady=(2, 10))
+            font=ui_font(11),
+            text_color=palette["text_secondary"],
+        ).pack(anchor="w", pady=(2, 12))
 
-        footer = tk.Frame(outer, bg=palette["bg"])
+        footer = ctk.CTkFrame(outer, fg_color="transparent")
         footer.pack(fill="x", side="bottom", pady=(12, 0))
 
         self._make_btn(
@@ -743,7 +735,7 @@ class SettingsDialog:
             text="Cancel",
             command=self.close,
             variant="secondary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=14,
             pady=6,
             palette=palette,
@@ -754,183 +746,189 @@ class SettingsDialog:
             text="Save Settings",
             command=self._handle_save,
             variant="primary",
-            font=("Segoe UI", 9, "bold"),
+            font=ui_font(11, "bold"),
             padx=16,
             pady=6,
             palette=palette,
         )
         self.save_btn.pack(side="right")
 
-        card = tk.Frame(
+        card_shell = SurfaceCard(
             outer,
-            bg=palette["surface"],
-            padx=16,
-            pady=14,
-            highlightthickness=1,
-            highlightbackground=palette["border_strong"],
+            palette=palette,
+            fg_color=palette["surface"],
+            border_color=palette["border_strong"],
+            corner_radius=RADII["lg"],
+            border_width=1,
         )
-        card.pack(fill="both", expand=True)
+        card_shell.pack(fill="both", expand=True)
+        card = ctk.CTkFrame(card_shell, fg_color="transparent")
+        card.pack(fill="both", expand=True, padx=18, pady=16)
 
         # 1. Pause / Break length
-        tk.Label(
+        ModernLabel(
             card,
-            text="PAUSE / BREAK DURATION",
-            font=("Segoe UI", 8, "bold"),
-            bg=palette["surface"],
-            fg=palette["text_muted"],
-        ).pack(anchor="w", pady=(0, 4))
+            text="Pause / break duration",
+            font=ui_font(10, "bold"),
+            text_color=palette["text_muted"],
+        ).pack(anchor="w", pady=(0, 6))
 
         self.break_var = tk.IntVar(value=current_settings.break_minutes)
-        brk_row = tk.Frame(card, bg=palette["surface"])
-        brk_row.pack(fill="x", pady=(0, 12))
+        brk_row = ctk.CTkFrame(card, fg_color="transparent")
+        brk_row.pack(fill="x", pady=(0, 14))
         for mins in (5, 10, 15):
-            tk.Radiobutton(
+            ctk.CTkRadioButton(
                 brk_row,
                 text=f"{mins} minutes",
                 variable=self.break_var,
                 value=mins,
-                font=("Segoe UI", 9),
-                bg=palette["surface"],
-                fg=palette["text"],
-                activebackground=palette["surface"],
-                activeforeground=palette["text"],
-                selectcolor=palette["surface_alt"],
-                cursor="hand2",
-            ).pack(side="left", padx=(0, 14))
+                font=ui_font(11),
+                text_color=palette["text"],
+                fg_color=palette["primary"],
+                hover_color=palette["primary_hover"],
+                border_color=palette["border_strong"],
+                radiobutton_width=16,
+                radiobutton_height=16,
+            ).pack(side="left", padx=(0, 16))
 
         # 2. Sensitivity / Timing Preset
-        tk.Label(
+        ModernLabel(
             card,
-            text="DETECTION SENSITIVITY PRESET",
-            font=("Segoe UI", 8, "bold"),
-            bg=palette["surface"],
-            fg=palette["text_muted"],
-        ).pack(anchor="w", pady=(0, 4))
+            text="Detection sensitivity preset",
+            font=ui_font(10, "bold"),
+            text_color=palette["text_muted"],
+        ).pack(anchor="w", pady=(0, 6))
 
         self.timing_var = tk.StringVar(value=current_settings.timing_preset)
-        tim_row = tk.Frame(card, bg=palette["surface"])
-        tim_row.pack(fill="x", pady=(0, 12))
+        tim_row = ctk.CTkFrame(card, fg_color="transparent")
+        tim_row.pack(fill="x", pady=(0, 14))
         for val, label in (
             ("dev", "Fast / Responsive (5s grace)"),
             ("demo", "Relaxed / Realistic (25s grace)"),
         ):
-            tk.Radiobutton(
+            ctk.CTkRadioButton(
                 tim_row,
                 text=label,
                 variable=self.timing_var,
                 value=val,
-                font=("Segoe UI", 9),
-                bg=palette["surface"],
-                fg=palette["text"],
-                activebackground=palette["surface"],
-                activeforeground=palette["text"],
-                selectcolor=palette["surface_alt"],
-                cursor="hand2",
-            ).pack(side="left", padx=(0, 14))
+                font=ui_font(11),
+                text_color=palette["text"],
+                fg_color=palette["primary"],
+                hover_color=palette["primary_hover"],
+                border_color=palette["border_strong"],
+                radiobutton_width=16,
+                radiobutton_height=16,
+            ).pack(side="left", padx=(0, 16))
 
         # 3. Pomodoro Cycles
-        tk.Label(
+        ModernLabel(
             card,
-            text="POMODORO CYCLES",
-            font=("Segoe UI", 8, "bold"),
-            bg=palette["surface"],
-            fg=palette["text_muted"],
-        ).pack(anchor="w", pady=(0, 4))
+            text="Pomodoro cycles",
+            font=ui_font(10, "bold"),
+            text_color=palette["text_muted"],
+        ).pack(anchor="w", pady=(0, 6))
 
-        pomo_row = tk.Frame(card, bg=palette["surface"])
-        pomo_row.pack(fill="x", pady=(0, 10))
+        pomo_row = ctk.CTkFrame(card, fg_color="transparent")
+        pomo_row.pack(fill="x", pady=(0, 12))
         self.pomodoro_var = tk.BooleanVar(value=current_settings.pomodoro_enabled)
-        tk.Checkbutton(
+        ctk.CTkCheckBox(
             pomo_row,
             text="Enable Pomodoro work/break loop by default   |   Cycles:",
             variable=self.pomodoro_var,
-            font=("Segoe UI", 9),
-            bg=palette["surface"],
-            fg=palette["text"],
-            activebackground=palette["surface"],
-            activeforeground=palette["text"],
-            selectcolor=palette["surface_alt"],
-            cursor="hand2",
+            font=ui_font(11),
+            text_color=palette["text"],
+            fg_color=palette["primary"],
+            hover_color=palette["primary_hover"],
+            border_color=palette["border_strong"],
+            checkbox_width=16,
+            checkbox_height=16,
+            corner_radius=4,
         ).pack(side="left")
 
         self.cycles_var = tk.StringVar(value=str(current_settings.pomodoro_cycles))
-        ttk.Entry(pomo_row, textvariable=self.cycles_var, width=4, font=("Segoe UI", 9), style="Modern.TEntry").pack(
-            side="left", padx=(6, 0)
-        )
+        ModernEntry(
+            pomo_row,
+            palette=palette,
+            textvariable=self.cycles_var,
+            width=48,
+            height=28,
+            font=mono_font(11, "bold"),
+            justify="center",
+        ).pack(side="left", padx=(8, 0))
 
         # 4. Mute & Global Hotkeys
         self.mute_var = tk.BooleanVar(value=current_settings.mute_sounds)
-        tk.Checkbutton(
+        ctk.CTkCheckBox(
             card,
             text="Mute alert chimes (Layer 2 warnings & break transitions)",
             variable=self.mute_var,
-            font=("Segoe UI", 9),
-            bg=palette["surface"],
-            fg=palette["text"],
-            activebackground=palette["surface"],
-            activeforeground=palette["text"],
-            selectcolor=palette["surface_alt"],
-            cursor="hand2",
-        ).pack(anchor="w", pady=(0, 4))
+            font=ui_font(11),
+            text_color=palette["text"],
+            fg_color=palette["primary"],
+            hover_color=palette["primary_hover"],
+            border_color=palette["border_strong"],
+            checkbox_width=16,
+            checkbox_height=16,
+            corner_radius=4,
+        ).pack(anchor="w", pady=(0, 8))
 
         self.hotkeys_var = tk.BooleanVar(value=current_settings.hotkeys_enabled)
-        tk.Checkbutton(
+        ctk.CTkCheckBox(
             card,
             text="Enable Global Hotkeys: Ctrl+Alt+P (Pause) · Ctrl+Alt+H (HUD) · Ctrl+Alt+R (Rules)",
             variable=self.hotkeys_var,
-            font=("Segoe UI", 9),
-            bg=palette["surface"],
-            fg=palette["text"],
-            activebackground=palette["surface"],
-            activeforeground=palette["text"],
-            selectcolor=palette["surface_alt"],
-            cursor="hand2",
-        ).pack(anchor="w", pady=(0, 12))
+            font=ui_font(11),
+            text_color=palette["text"],
+            fg_color=palette["primary"],
+            hover_color=palette["primary_hover"],
+            border_color=palette["border_strong"],
+            checkbox_width=16,
+            checkbox_height=16,
+            corner_radius=4,
+        ).pack(anchor="w", pady=(0, 14))
 
-        tk.Frame(card, bg=palette["border"], height=1).pack(fill="x", pady=(0, 10))
+        tk.Frame(card, bg=palette["border"], height=1).pack(fill="x", pady=(0, 12))
 
         # 5. Gemini API Key section
-        key_hdr = tk.Frame(card, bg=palette["surface"])
-        key_hdr.pack(fill="x", pady=(0, 4))
-        tk.Label(
+        key_hdr = ctk.CTkFrame(card, fg_color="transparent")
+        key_hdr.pack(fill="x", pady=(0, 6))
+        ModernLabel(
             key_hdr,
-            text="GEMINI API KEY (.env)",
-            font=("Segoe UI", 8, "bold"),
-            bg=palette["surface"],
-            fg=palette["text_muted"],
+            text="Gemini API key (.env)",
+            font=ui_font(10, "bold"),
+            text_color=palette["text_muted"],
         ).pack(side="left")
 
-        get_key_link = tk.Label(
+        get_key_link = ModernLabel(
             key_hdr,
             text="Get Key ↗",
-            font=("Segoe UI", 8, "bold"),
-            bg=palette["surface"],
-            fg=palette["primary"],
+            font=ui_font(10, "bold"),
+            text_color=palette["primary"],
             cursor="hand2",
         )
         get_key_link.pack(side="left", padx=(8, 0))
         get_key_link.bind("<Button-1>", lambda _e: self._url_opener("https://aistudio.google.com/apikey"))
 
         configured, status_str = api_key_status
-        self.key_status_lbl = tk.Label(
+        self.key_status_lbl = ModernLabel(
             key_hdr,
             text=status_str,
-            font=("Segoe UI", 8, "bold"),
-            bg=palette["surface"],
-            fg=palette["success"] if configured else palette["warning"],
+            font=ui_font(10, "bold"),
+            text_color=palette["success"] if configured else palette["warning"],
         )
         self.key_status_lbl.pack(side="right")
 
-        key_row = tk.Frame(card, bg=palette["surface"])
+        key_row = ctk.CTkFrame(card, fg_color="transparent")
         key_row.pack(fill="x")
 
         self.key_var = tk.StringVar(value="")
-        self.key_entry = ttk.Entry(
+        self.key_entry = ModernEntry(
             key_row,
+            palette=palette,
             textvariable=self.key_var,
             show="•",
-            font=("Segoe UI", 9),
-            style="Modern.TEntry",
+            font=ui_font(11),
+            height=34,
         )
         self.key_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
@@ -939,8 +937,8 @@ class SettingsDialog:
             text="Show",
             command=self._handle_toggle_show_key,
             variant="secondary",
-            font=("Segoe UI", 8, "bold"),
-            padx=8,
+            font=ui_font(10, "bold"),
+            padx=10,
             pady=5,
             palette=palette,
         )
@@ -951,7 +949,7 @@ class SettingsDialog:
             text="Save Key",
             command=self._handle_save_key,
             variant="secondary",
-            font=("Segoe UI", 8, "bold"),
+            font=ui_font(10, "bold"),
             padx=10,
             pady=5,
             palette=palette,
@@ -963,22 +961,22 @@ class SettingsDialog:
             text="Test Connection",
             command=self._handle_test_key,
             variant="secondary",
-            font=("Segoe UI", 8, "bold"),
+            font=ui_font(10, "bold"),
             padx=10,
             pady=5,
             palette=palette,
         )
         self.test_key_btn.pack(side="left", padx=(0, 4))
 
-        self.remove_key_btn: tk.Button | None = None
+        self.remove_key_btn: Any = None
         if on_clear_api_key is not None:
             self.remove_key_btn = self._make_btn(
                 key_row,
                 text="Remove Key",
                 command=self._handle_clear_key,
                 variant="danger_outline",
-                font=("Segoe UI", 8, "bold"),
-                padx=8,
+                font=ui_font(10, "bold"),
+                padx=10,
                 pady=5,
                 palette=palette,
             )
@@ -986,19 +984,18 @@ class SettingsDialog:
                 self.remove_key_btn.configure(state="disabled")
             self.remove_key_btn.pack(side="left")
 
-        self.key_feedback_lbl = tk.Label(
+        self.key_feedback_lbl = ModernLabel(
             card,
             text="Paste a new key to update .env locally (never shared or logged).",
-            font=("Segoe UI", 8),
-            bg=palette["surface"],
-            fg=palette["text_muted"],
+            font=ui_font(10),
+            text_color=palette["text_muted"],
             anchor="w",
         )
-        self.key_feedback_lbl.pack(fill="x", pady=(4, 0))
+        self.key_feedback_lbl.pack(fill="x", pady=(6, 0))
 
         win.bind("<Escape>", lambda _e: self.close())
         win.protocol("WM_DELETE_WINDOW", self.close)
-        self._fit(win, min_w=580, min_h=470, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+        self._fit(win, min_w=640, min_h=500, pos="center", pad_w=12, pad_h=12, allow_resize=True)
         apply_dark_titlebar(win, dark)
         if focus_api_key:
             try:
