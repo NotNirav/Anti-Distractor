@@ -1,13 +1,57 @@
 // Anti-Distractor Browser Sensor - Manifest V3 Background Service Worker
-// Reports tab snapshots to http://127.0.0.1:8765/tabs and polls for close_tabs commands.
+// Reports tab snapshots to http://127.0.0.1:8765/tabs, polls for close_tabs commands,
+// and updates the browser toolbar badge (ON / BRK / !).
 
 const SERVER_BASE = "http://127.0.0.1:8765";
 const POLL_INTERVAL_MS = 1500;
+
+let lastBadgeKey = "";
+
+async function updateToolbarBadge(sessionInfo) {
+  let text = "";
+  let color = "#64748B";
+
+  if (sessionInfo && sessionInfo.session_active) {
+    if (sessionInfo.paused) {
+      text = "BRK";
+      color = "#D97706";
+    } else if (
+      sessionInfo.state === "GRACE_PERIOD" ||
+      sessionInfo.state === "LAYER_1_ASK" ||
+      sessionInfo.state === "LAYER_2_ULTIMATUM"
+    ) {
+      text = "!";
+      color = "#DC2626";
+    } else {
+      text = "ON";
+      color = "#16A34A";
+    }
+  }
+
+  const key = `${text}:${color}`;
+  if (key === lastBadgeKey) return;
+  lastBadgeKey = key;
+
+  try {
+    await chrome.action.setBadgeText({ text });
+    if (text) {
+      await chrome.action.setBadgeBackgroundColor({ color });
+      if (chrome.action.setBadgeTextColor) {
+        await chrome.action.setBadgeTextColor({ color: "#FFFFFF" });
+      }
+    }
+  } catch {
+    // Ignore badge errors
+  }
+}
 
 function extractDomain(url) {
   if (!url) return "";
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "";
+    }
     let host = parsed.hostname.toLowerCase();
     if (host.startsWith("www.")) {
       host = host.slice(4);
@@ -103,15 +147,19 @@ async function pollCommands() {
   isPollingCommands = true;
   try {
     const resp = await fetch(`${SERVER_BASE}/commands`);
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      await updateToolbarBadge(null);
+      return;
+    }
     const data = await resp.json();
+    await updateToolbarBadge(data ? data.session : null);
     if (data && Array.isArray(data.commands) && data.commands.length > 0) {
       for (const cmd of data.commands) {
         await executeCommand(cmd);
       }
     }
   } catch {
-    // Fail silently when server is unreachable
+    await updateToolbarBadge(null);
   } finally {
     isPollingCommands = false;
   }
@@ -159,10 +207,12 @@ chrome.alarms.onAlarm.addListener(alarm => {
 // Lifecycle events
 chrome.runtime.onInstalled.addListener(() => {
   sendSnapshot("baseline");
+  pollCommands();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   sendSnapshot("baseline");
+  pollCommands();
 });
 
 console.log("Anti-Distractor browser sensor initialized.");

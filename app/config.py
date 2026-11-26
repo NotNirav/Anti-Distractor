@@ -7,7 +7,20 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env from project root with override=True so local keys take precedence
+
+def _fallback_dotenv_path() -> Path:
+    if os.name == "nt":
+        base = Path(os.getenv("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+        return base / "Anti-Distractor" / ".env"
+    xdg = os.getenv("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else (Path.home() / ".config")
+    return base / "anti-distractor" / ".env"
+
+
+# Load fallback user-config .env first (if present), then project-root .env so local repo keys take precedence
+_fallback_env = _fallback_dotenv_path()
+if _fallback_env.is_file():
+    load_dotenv(_fallback_env, override=True)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 

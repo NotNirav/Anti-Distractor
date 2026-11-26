@@ -615,3 +615,38 @@ def test_lockout_expiry_post_check_off_task_returns_straight_to_strict_layer2():
     assert 103 in queue.enqueued_tabs
     # Show strict overlay was called again
     assert len(ui_hooks.strict_overlays) == 2
+
+
+def test_grace_remaining_seconds_and_allow_domain_action():
+    clock = FakeClock(500.0)
+    cache = VerdictCache()
+    quick_rules: list[tuple[str, str]] = []
+
+    sm = AgentStateMachine(
+        "Study DSA",
+        "normal",
+        TEST_TIMINGS,
+        cache,
+        clock=clock,
+        on_quick_rule=lambda action, dom: quick_rules.append((action, dom)),
+    )
+    assert sm.grace_remaining_seconds() == 0.0
+
+    ctx = make_context("neetcode.io", "NeetCode Roadmap", is_browser=True, tab_ids=[101])
+    sm.handle_verdict(ctx, make_verdict(on_task=False, reason="Unrecognized site"))
+    assert sm.state == "GRACE_PERIOD"
+    assert sm.grace_remaining_seconds() == pytest.approx(TEST_TIMINGS.grace_period_seconds)
+
+    clock.advance(2.0)
+    assert sm.grace_remaining_seconds() == pytest.approx(TEST_TIMINGS.grace_period_seconds - 2.0)
+
+    clock.advance(TEST_TIMINGS.grace_period_seconds)
+    sm.handle_tick()
+    assert sm.state == "LAYER_1_ASK"
+    assert sm.grace_remaining_seconds() == 0.0
+
+    decision = sm.handle_user_action("allow_domain")
+    assert decision.state == "ON_TASK"
+    assert decision.action_taken == "cleared"
+    assert quick_rules == [("allow", "neetcode.io")]
+    assert cache.get("neetcode.io", "NeetCode Roadmap") is not None

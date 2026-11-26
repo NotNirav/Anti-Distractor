@@ -114,3 +114,41 @@ class AgentDecision:
     tabs_to_close: list[int]
     minimize_hwnd: int | None = None
     lockout_seconds: float = 0.0
+
+
+@dataclass
+class ClosedTabEntry:
+    """Metadata of a distracting tab closed in Strict Mode for post-session recovery."""
+
+    title: str
+    url: str
+    domain: str
+    closed_at: float
+
+
+@dataclass
+class ActivityFeedItem:
+    """Single live evaluation entry displayed in the Activity / Explainability drawer."""
+
+    log_id: int | None
+    timestamp: float
+    source_key: str
+    title: str
+    on_task: bool
+    tier_used: int
+    model_used: str
+    confidence: float
+    reason: str
+    action_taken: str
+    overridden: bool = False
+
+
+@dataclass
+class SessionKPIs:
+    """Top-level session focus metrics rendered as summary cards on the Review screen."""
+
+    focus_score_pct: int
+    focused_minutes: float
+    distractions_count: int
+    overrides_count: int
+    total_checks: int

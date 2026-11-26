@@ -4,61 +4,233 @@
   <meta charset="UTF-8" />
   <title>Anti-Distractor</title>
   <style>
+    :root {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --surface-alt: #f8fafc;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-secondary: #475569;
+      --text-muted: #64748b;
+      --primary: #2563eb;
+      --primary-soft: #eff6ff;
+      --success: #16a34a;
+      --success-soft: #f0fdf4;
+      --warning: #d97706;
+      --warning-soft: #fffbeb;
+      --danger: #dc2626;
+      --danger-soft: #fef2f2;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --surface: #1e293b;
+        --surface-alt: #162032;
+        --border: #334155;
+        --text: #f8fafc;
+        --text-secondary: #cbd5e1;
+        --text-muted: #94a3b8;
+        --primary: #3b82f6;
+        --primary-soft: #172554;
+        --success: #22c55e;
+        --success-soft: #052e16;
+        --warning: #f59e0b;
+        --warning-soft: #451a03;
+        --danger: #f87171;
+        --danger-soft: #450a0a;
+      }
+    }
+
     body {
-      font-family: system-ui, -apple-system, sans-serif;
-      width: 250px;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      width: 285px;
       padding: 14px;
       margin: 0;
-      background: #f8fafc;
-      color: #1e293b;
+      background: var(--bg);
+      color: var(--text);
     }
-    h1 {
-      font-size: 14px;
-      font-weight: 700;
-      margin: 0 0 10px;
+
+    .header {
       display: flex;
       align-items: center;
-      gap: 6px;
+      justify-content: space-between;
+      margin-bottom: 10px;
     }
-    .badge {
+
+    h1 {
+      font-size: 13px;
+      font-weight: 700;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .dot {
       display: inline-block;
       width: 8px;
       height: 8px;
       border-radius: 50%;
       background: #94a3b8;
     }
-    .badge.connected { background: #22c55e; }
-    .badge.disconnected { background: #ef4444; }
-    .card {
-      background: #ffffff;
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-      padding: 10px;
-      font-size: 12px;
-      line-height: 1.5;
-    }
-    .label {
-      color: #64748b;
-      font-size: 11px;
+    .dot.connected { background: var(--success); }
+    .dot.disconnected { background: var(--danger); }
+
+    .pill {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.4px;
+      background: var(--surface-alt);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
     }
+    .pill.active { background: var(--success-soft); color: var(--success); border-color: transparent; }
+    .pill.paused { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+    .pill.alert { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 11px;
+      font-size: 12px;
+      line-height: 1.45;
+      margin-bottom: 10px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .row:last-child {
+      margin-bottom: 0;
+    }
+
+    .label {
+      color: var(--text-muted);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
     .val {
       font-weight: 600;
-      margin-bottom: 6px;
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .timer {
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .domain-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .rule-tag {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      background: var(--surface-alt);
+      color: var(--text-secondary);
+    }
+    .rule-tag.allowed { background: var(--success-soft); color: var(--success); }
+    .rule-tag.borderline { background: var(--warning-soft); color: var(--warning); }
+    .rule-tag.blocked { background: var(--danger-soft); color: var(--danger); }
+
+    .actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    button {
+      flex: 1;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      background: var(--surface-alt);
+      color: var(--text);
+      transition: filter 0.12s ease;
+    }
+    button:hover:not(:disabled) {
+      filter: brightness(0.95);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    button.btn-allow {
+      background: var(--success-soft);
+      color: var(--success);
+      border-color: transparent;
+    }
+    button.btn-block {
+      background: var(--danger-soft);
+      color: var(--danger);
+      border-color: transparent;
+    }
+
+    .feedback {
+      font-size: 11px;
+      color: var(--text-muted);
+      min-height: 15px;
+      text-align: center;
     }
   </style>
 </head>
 <body>
-  <h1><span id="badge" class="badge"></span> Anti-Distractor Sensor</h1>
-  <div class="card">
-    <div class="label">Local Bridge</div>
-    <div id="conn-status" class="val">Connecting...</div>
-    <div class="label">Session Status</div>
-    <div id="session-status" class="val">-</div>
-    <div class="label">Active Goal</div>
-    <div id="goal-status" class="val">-</div>
+  <div class="header">
+    <h1><span id="badge" class="dot"></span> Anti-Distractor</h1>
+    <span id="state-pill" class="pill">Connecting</span>
   </div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="label">Session</div>
+        <div id="session-status" class="val">Checking local bridge...</div>
+      </div>
+      <div id="timer-status" class="timer">--:--</div>
+    </div>
+
+    <div class="label" style="margin-top: 6px;">Active Goal</div>
+    <div id="goal-status" class="val" style="margin-top: 2px;">-</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Current Tab</div>
+    <div class="domain-row">
+      <div id="tab-domain" class="val">-</div>
+      <span id="tab-rule" class="rule-tag">-</span>
+    </div>
+    <div class="actions">
+      <button id="btn-allow" class="btn-allow" disabled>+ Allow Site</button>
+      <button id="btn-block" class="btn-block" disabled>&#10005; Block Site</button>
+    </div>
+  </div>
+
+  <div id="feedback" class="feedback"></div>
   <script src="popup.js"></script>
 </body>
 </html>

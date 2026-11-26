@@ -10,23 +10,27 @@
 Anti-Distractor/
 ├── README.md                  # Project overview, quick start, 2-minute demo script, tests
 ├── .env.example               # Template for GEMINI_API_KEY, runtime mode, and model chain
-├── .gitignore                 # Ignore .env, venv, __pycache__, *.db, last_session.json, logs
+├── .gitignore                 # Ignore .env, venv, __pycache__, *.db, last_session.json, settings.json, presets.json, logs
 ├── requirements.txt           # Python dependencies (including pystray & Pillow)
 ├── app/
 │   ├── __init__.py
 │   ├── config.py              # Timing presets (dev/demo), thresholds, server & model settings
-│   ├── models.py              # Shared dataclasses/TypedDicts for events, tabs, verdicts, state
-│   ├── logger.py              # SQLite persistence for sessions and text-only activity logs
+│   ├── models.py              # Shared dataclasses/TypedDicts for events, tabs, verdicts, KPIs, vault
+│   ├── settings.py            # JSON settings/presets stores & safe .env GEMINI_API_KEY updater
+│   ├── win32_ui.py            # Windows brand icon, DWM dark titlebar, WS_EX_NOACTIVATE, monitor work area
+│   ├── hotkeys.py             # Optional global Windows hotkeys (Ctrl+Alt+P / H / R) via RegisterHotKey
+│   ├── logger.py              # SQLite persistence for sessions, analytics, Tab Vault, and activity logs
 │   ├── profile.py             # GoalProfile generation via Gemini + domain/title normalization
 │   ├── cache.py               # In-memory VerdictCache with override support
 │   ├── screen.py              # In-memory mss screenshot capture + Pillow downscaling
 │   ├── window_watcher.py      # pywin32 + psutil foreground window tracking & minimize helper
 │   ├── judge.py               # Tier 0 rules/cache, Tier 1/2 AI failover chain, review AI
-│   ├── server.py              # FastAPI local bridge (/health, /tabs, /commands, /commands/ack)
+│   ├── server.py              # FastAPI bridge (/health, /status, /rules/quick, /tabs, /commands, /commands/ack)
 │   ├── event_engine.py        # Debounce, dwell, heartbeat, pause/snooze, tier escalation
-│   ├── state_machine.py       # Deterministic agent state machine (Normal/Strict, Layer 1/2)
+│   ├── state_machine.py       # Deterministic agent state machine (Normal/Strict, Grace, Layer 1/2)
 │   ├── tray.py                # Windows system tray icon manager via pystray & Pillow
-│   ├── ui.py                  # Tkinter UI (Dark/Light, Setup, HUD, Rules Editor, Overlay, Review)
+│   ├── ui_dialogs.py          # ToolTip, Live Activity Drawer, History & Analytics, Settings dialog
+│   ├── ui.py                  # Tkinter UI (Dark/Light, Setup, Mini-Pill HUD, Rules Editor, Overlay, Review)
 │   └── main.py                # Application entry point & cross-thread orchestration
 ├── docs/
 │   ├── AGENTS.md              # Agent working rules and escalation policy
@@ -38,14 +42,14 @@ Anti-Distractor/
 │   └── plan.md                # Original project plan
 ├── extension/
 │   ├── manifest.json          # Chrome/Edge Manifest V3 configuration
-│   ├── background.js          # Service worker: tab listeners, snapshot POST, command polling
-│   ├── popup.html             # Status popup for debugging bridge connection/session state
-│   └── popup.js               # Status popup controller polling GET /health
+│   ├── background.js          # Service worker: tab listeners, snapshot POST, command poll, toolbar badge
+│   ├── popup.html             # Dark/light status popup & quick allow/block UI
+│   └── popup.js               # Status popup controller polling GET /status & POST /rules/quick
 ├── scripts/
 │   ├── ui_demo.py             # Manual UI walkthrough exercising HUD, popups, rules, overlay
 │   ├── run_image_benchmark.py # 20-screenshot benchmark evaluation harness
 │   └── benchmark_images/      # Benchmark fixtures and benchmark_results.json
-└── tests/                     # 56 unit and integration tests (offline fakes)
+└── tests/                     # 70 unit and integration tests (offline fakes)
 ```
 
 ---
@@ -190,6 +194,38 @@ class AgentDecision:
     tabs_to_close: list[int]
     minimize_hwnd: int | None = None
     lockout_seconds: float = 0.0
+
+@dataclass
+class ClosedTabEntry:
+    """Metadata of a distracting tab closed in Strict Mode for post-session recovery."""
+    title: str
+    url: str
+    domain: str
+    closed_at: float
+
+@dataclass
+class ActivityFeedItem:
+    """Single live evaluation entry displayed in the Activity / Explainability drawer."""
+    log_id: int | None
+    timestamp: float
+    source_key: str
+    title: str
+    on_task: bool
+    tier_used: int
+    model_used: str
+    confidence: float
+    reason: str
+    action_taken: str
+    overridden: bool = False
+
+@dataclass
+class SessionKPIs:
+    """Top-level session focus metrics rendered as summary cards on the Review screen."""
+    focus_score_pct: int
+    focused_minutes: float
+    distractions_count: int
+    overrides_count: int
+    total_checks: int
 ```
 
 ---
@@ -326,26 +362,34 @@ class AgentStateMachine:
         mode: ModeType,
         timings: TimingConfig,
         cache: VerdictCache,
-        command_queue: CommandQueue,
-        on_decision: Callable[[AgentDecision], None],
+        command_queue: CommandQueue | None = None,
+        on_decision: Callable[[AgentDecision], None] | None = None,
+        ui_hooks: UIHooks | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        on_override: Callable[[ActivityContext | None, str], None] | None = None,
+        minimize_fn: Callable[[int], bool] | None = None,
+        on_lockout_done: Callable[[], None] | None = None,
+        on_quick_rule: Callable[[Literal["allow", "block"], str], Any] | None = None,
     ) -> None: ...
-    def handle_verdict(self, ctx: ActivityContext, verdict: JudgeVerdict) -> AgentDecision:
+    def handle_verdict(self, ctx: ActivityContext | None, verdict: JudgeVerdict | None) -> AgentDecision:
         """Advance state machine for a new verdict and return the resulting AgentDecision."""
+    def grace_remaining_seconds(self, now: float | None = None) -> float:
+        """Return remaining seconds in GRACE_PERIOD, or 0.0."""
     def handle_tick(self, now: float | None = None) -> AgentDecision | None:
         """Check grace period and strict-mode lockout expirations on a periodic tick."""
-    def handle_user_action(self, action: Literal["back_to_work", "relevant"]) -> AgentDecision:
-        """Handle user button clicks from Layer 1 popup, updating overrides and cache."""
+    def handle_user_action(self, action: Literal["back_to_work", "relevant", "allow_domain"]) -> AgentDecision:
+        """Handle user button clicks from Layer 1 popup, updating overrides, quick rules, and cache."""
     def end_session(self) -> AgentDecision:
         """Transition state machine to ENDED and clear active warnings/overlays."""
 ```
 
-### SQLite Logger (`app/logger.py`)
+### SQLite Logger & Analytics (`app/logger.py`)
 ```python
 class SessionLogger:
     """Thread-safe SQLite logger storing session metadata and text-only activity verdicts."""
     def __init__(self, db_path: str = "anti_distractor.db") -> None: ...
     def init_db(self) -> None:
-        """Create tables if they do not exist."""
+        """Create tables and run safe schema migrations if needed."""
     def start_session(self, goal: str, mode: ModeType, duration_minutes: int, profile: GoalProfile) -> int:
         """Insert a new session row and return session_id."""
     def log_event(
@@ -359,11 +403,20 @@ class SessionLogger:
         """Persist a single evaluation event and return the row id."""
     def mark_override(self, log_id: int) -> None:
         """Set user_override = 1 on an existing activity log row."""
-    def finish_session(self, session_id: int, review_text: str) -> None:
-        """Record ended_at timestamp and AI-generated session review."""
+    def finish_session(self, session_id: int, review_text: str, closed_tabs: list[dict[str, Any]] | None = None) -> None:
+        """Record ended_at timestamp, AI-generated review, and strict-closed Tab Vault entries."""
     def get_session_logs(self, session_id: int) -> list[dict[str, Any]]:
         """Fetch all activity log rows for a session ordered by timestamp."""
+    def list_sessions_summary(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return past sessions with focus score %, distraction counts, parsed profile, and closed tabs."""
+    def get_overall_stats(self) -> dict[str, Any]:
+        """Compute current_streak_days, total_focus_hours, completed_sessions, avg_focus_score_pct, top_distractions."""
 ```
+
+### Win32 Window Helpers, Global Hotkeys & Settings (`app/win32_ui.py`, `app/hotkeys.py`, `app/settings.py`)
+- `app/win32_ui.py`: `apply_brand_icon`, `apply_dark_titlebar` (`DWMWA_USE_IMMERSIVE_DARK_MODE=20` with `19` fallback), `apply_noactivate_topmost` (`WS_EX_NOACTIVATE | WS_EX_TOPMOST`), `get_monitor_work_area`.
+- `app/hotkeys.py`: `GlobalHotkeyManager` (`Ctrl+Alt+P`, `Ctrl+Alt+H`, `Ctrl+Alt+R` via Win32 `RegisterHotKey` + `WM_QUIT`).
+- `app/settings.py`: `AppSettings`, `SettingsStore`, `FocusPreset`, `PresetsStore` (3 starter presets + CRUD), `read_masked_api_key`, `write_api_key_to_dotenv`.
 
 ### System Tray (`app/tray.py`)
 ```python
@@ -387,7 +440,7 @@ class SystemTrayManager:
     def stop(self) -> None: ...
 ```
 
-### UI Hooks (`app/ui.py`)
+### UI Hooks (`app/ui.py`, `app/ui_dialogs.py`)
 ```python
 ThemeType = Literal["light", "dark"]
 
@@ -413,9 +466,14 @@ class UIHooks(Protocol):
     ) -> None: ...
     def update_hud_status(self, state: AgentStateName, summary: str) -> None: ...
     def update_extension_status(self, connected: bool) -> None: ...
-    def update_pause_status(self, paused: bool, remaining_seconds: float = 0.0) -> None: ...
+    def update_pause_status(self, paused: bool, remaining_seconds: float = 0.0, summary: str | None = None) -> None: ...
     def show_rules_editor(self, profile: GoalProfile, on_save: Callable[[GoalProfile], None]) -> None: ...
-    def show_layer1_popup(self, goal: str, reason: str, on_choice: Callable[[Literal["back_to_work", "relevant"]], None]) -> None: ...
+    def show_layer1_popup(
+        self,
+        goal: str,
+        reason: str,
+        on_choice: Callable[[Literal["back_to_work", "relevant", "allow_domain"]], None],
+    ) -> None: ...
     def show_layer2_warning(self, goal: str, reason: str) -> None: ...
     def show_strict_overlay(self, goal: str, reason: str, lockout_seconds: float, on_lockout_done: Callable[[], None]) -> None: ...
     def hide_popups_and_overlay(self) -> None: ...
@@ -428,6 +486,7 @@ class UIHooks(Protocol):
         on_new_session: Callable[[], None] | None = None,
     ) -> None: ...
 ```
+`TkinterUI` also provides backward-compatible optional extensions used by `AppController`: `update_grace_countdown`, `set_mini_mode`, `update_setup_progress`, `reset_hud_timer`, `configure_preferences`, `append_activity_item`, `mark_activity_overridden`, `show_activity_drawer`, `show_history_dialog`, `show_settings_dialog`, and optional keyword arguments on `show_setup`, `show_monitoring_hud`, `show_rules_editor` (`on_ai_suggest`, `active_target`), `show_layer1_popup` (`source_label`), and `show_review` (`kpis`, `closed_tabs`).
 
 ---
 
@@ -482,9 +541,16 @@ Local server listens on `http://127.0.0.1:8765` (CORS enabled for `chrome-extens
 ### Endpoints
 
 1. **`GET /health`**
-   - Response `200`: `{"status": "ok", "session_active": true, "goal": "DSA"}`
+   - Response `200`: telemetry JSON (`status`, `session_active`, `goal`, `mode`, `state`, `paused`, `remaining_seconds`, `pause_remaining_seconds`, `domain`, `domain_rule`).
 
-2. **`POST /tabs`**
+2. **`GET /status?domain=<optional_domain>`**
+   - Marks extension as recently seen and returns live session telemetry + `domain_rule` (`"allowed" | "borderline" | "blocked" | "neutral"`) for the active tab's domain.
+
+3. **`POST /rules/quick`**
+   - Request JSON: `{"action": "allow" | "block", "domain": "reddit.com"}`
+   - Normalizes domain via `normalize_domain`, updates the live `GoalProfile`, clears `VerdictCache`, and returns `{"ok": true, "action": "allow", "domain": "reddit.com", "domain_rule": "allowed"}` (400 on non-web/empty domain, 409 if no active session).
+
+4. **`POST /tabs`**
    - Sent by `extension/background.js` on `tabs.onActivated`, `tabs.onUpdated` (when `title`/`url` changes or `status === "complete"`), `tabs.onCreated`, `tabs.onRemoved`, and `windows.onFocusChanged`.
    - Request JSON:
      ```json
@@ -508,7 +574,7 @@ Local server listens on `http://127.0.0.1:8765` (CORS enabled for `chrome-extens
      ```
    - Response `200`: `{"ok": true, "received_tabs": 1}`
 
-3. **`GET /commands`**
+5. **`GET /commands`**
    - Polled by `extension/background.js` every `1.5–2.0 s` (using `setInterval` / `chrome.alarms` while active).
    - Response `200`:
      ```json
@@ -519,17 +585,22 @@ Local server listens on `http://127.0.0.1:8765` (CORS enabled for `chrome-extens
            "action": "close_tabs",
            "tab_ids": [42]
          }
-       ]
+       ],
+       "session": {
+         "session_active": true,
+         "state": "ON_TASK",
+         "paused": false
+       }
      }
      ```
 
-4. **`POST /commands/ack`**
+6. **`POST /commands/ack`**
    - Sent by extension after running `chrome.tabs.remove(tab_ids)`.
    - Request JSON: `{"command_id": "cmd-1234", "closed_tab_ids": [42], "errors": []}`
    - Response `200`: `{"ok": true}`
 
-### Extension Liveness Heartbeat (`TabSnapshotStore`)
-`POST /tabs` (via `TabSnapshotStore.update()`), `GET /commands`, and `POST /commands/ack` call `TabSnapshotStore.mark_extension_seen()`. `AppController` polls `TabSnapshotStore.is_extension_connected(stale_seconds=8.0) -> bool` on every tick to update the HUD's `Ext: Live` / `Ext: Off` indicator.
+### Extension Liveness Heartbeat & Toolbar Badge (`TabSnapshotStore`, `extension/background.js`)
+`POST /tabs` (via `TabSnapshotStore.update()`), `GET /status`, `GET /commands`, and `POST /commands/ack` call `TabSnapshotStore.mark_extension_seen()`. `AppController` polls `TabSnapshotStore.is_extension_connected(stale_seconds=8.0) -> bool` on every tick to update the HUD's `Ext: Live` / `Ext: Off` indicator, while `background.js` reads `session` from `GET /commands` to update `chrome.action.setBadgeText` (`ON` green, `BRK` amber, `!` red, empty when idle).
 
 ### Close-Tab Command Flow
 1. Strict mode in `AgentStateMachine` queues a `close_tabs` command in `CommandQueue` with `tab_ids` (from `JudgeVerdict.tabs_to_close`, or the active off-task browser tab if `tabs_to_close` is empty).
@@ -549,7 +620,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at REAL NOT NULL,
     ended_at REAL,
     profile_json TEXT NOT NULL,
-    review_text TEXT
+    review_text TEXT,
+    closed_tabs_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS activity_logs (
@@ -572,4 +644,4 @@ CREATE TABLE IF NOT EXISTS activity_logs (
 );
 ```
 
-`SessionLogger.init_db()` also runs `ALTER TABLE activity_logs ADD COLUMN model_used TEXT DEFAULT ''` in a `try/except` block to migrate older `.db` files automatically.
+`SessionLogger.init_db()` runs `ALTER TABLE activity_logs ADD COLUMN model_used TEXT DEFAULT ''` and `ALTER TABLE sessions ADD COLUMN closed_tabs_json TEXT NOT NULL DEFAULT '[]'` inside `try/except` blocks to migrate older `.db` files automatically.

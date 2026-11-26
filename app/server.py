@@ -6,10 +6,10 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -132,13 +132,20 @@ class CommandAckPayload(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class QuickRulePayload(BaseModel):
+    action: Literal["allow", "block"]
+    domain: str
+
+
 def create_app(
     tab_store: TabSnapshotStore,
     command_queue: CommandQueue,
     on_tab_event: Callable[[TriggerType], None] | None = None,
     session_status_provider: Callable[[], tuple[bool, str | None]] | None = None,
+    telemetry_provider: Callable[[str | None], dict[str, Any]] | None = None,
+    on_quick_rule: Callable[[Literal["allow", "block"], str], dict[str, Any] | None] | None = None,
 ) -> FastAPI:
-    """Build and configure the FastAPI application with /health, /tabs, /commands, /commands/ack."""
+    """Build and configure the FastAPI application with /health, /status, /tabs, /commands, /rules/quick."""
     app = FastAPI(title="Anti-Distractor Bridge")
 
     # Enable CORS for browser extensions and local origins
@@ -150,16 +157,73 @@ def create_app(
         allow_headers=["*"],
     )
 
-    @app.get("/health")
-    def health() -> dict[str, Any]:
+    def _build_telemetry(domain: str | None = None) -> dict[str, Any]:
         session_active = False
-        goal = None
+        goal: str | None = None
         if session_status_provider is not None:
             try:
                 session_active, goal = session_status_provider()
             except Exception:
-                logger.exception("Error in health status provider callback")
-        return {"status": "ok", "session_active": session_active, "goal": goal}
+                logger.exception("Error in session_status_provider callback")
+
+        norm_dom = normalize_domain(domain or "")
+        base: dict[str, Any] = {
+            "status": "ok",
+            "session_active": bool(session_active),
+            "goal": goal,
+            "mode": "strict",
+            "state": "ON_TASK" if session_active else "IDLE",
+            "paused": False,
+            "remaining_seconds": 0.0,
+            "pause_remaining_seconds": 0.0,
+            "domain": norm_dom,
+            "domain_rule": "neutral",
+        }
+        if telemetry_provider is not None:
+            try:
+                extra = telemetry_provider(norm_dom or None)
+                if isinstance(extra, dict):
+                    base.update(extra)
+                    base["status"] = "ok"
+            except Exception:
+                logger.exception("Error in telemetry_provider callback")
+        return base
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        return _build_telemetry(None)
+
+    @app.get("/status")
+    def get_status(domain: str = Query(default="")) -> dict[str, Any]:
+        tab_store.mark_extension_seen()
+        return _build_telemetry(domain)
+
+    @app.post("/rules/quick")
+    def post_quick_rule(payload: QuickRulePayload) -> dict[str, Any]:
+        tab_store.mark_extension_seen()
+        norm_dom = normalize_domain(payload.domain)
+        if not norm_dom:
+            raise HTTPException(status_code=400, detail="Invalid or non-web domain.")
+        if on_quick_rule is None:
+            raise HTTPException(status_code=409, detail="Quick rules unavailable (no active session).")
+        try:
+            res = on_quick_rule(payload.action, norm_dom)
+        except Exception as exc:
+            logger.exception("Error applying quick rule for %s", norm_dom)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        if isinstance(res, dict) and res.get("ok") is False:
+            raise HTTPException(status_code=409, detail=str(res.get("error") or "No active session."))
+
+        out: dict[str, Any] = {
+            "ok": True,
+            "action": payload.action,
+            "domain": norm_dom,
+            "domain_rule": "allowed" if payload.action == "allow" else "blocked",
+        }
+        if isinstance(res, dict):
+            out.update(res)
+        return out
 
     @app.post("/tabs")
     def post_tabs(payload: TabEventPayload) -> dict[str, Any]:
@@ -211,7 +275,15 @@ def create_app(
     @app.get("/commands")
     def get_commands() -> dict[str, Any]:
         tab_store.mark_extension_seen()
-        return {"commands": command_queue.poll_commands()}
+        telemetry = _build_telemetry(None)
+        return {
+            "commands": command_queue.poll_commands(),
+            "session": {
+                "session_active": telemetry.get("session_active", False),
+                "state": telemetry.get("state", "IDLE"),
+                "paused": telemetry.get("paused", False),
+            },
+        }
 
     @app.post("/commands/ack")
     def post_commands_ack(payload: CommandAckPayload) -> dict[str, Any]:
@@ -266,4 +338,3 @@ if __name__ == "__main__":
         session_status_provider=lambda: (True, "Demo Focus Goal"),
     )
     uvicorn.run(demo_app, host="127.0.0.1", port=8765)
-

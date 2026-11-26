@@ -40,7 +40,7 @@ class UIHooks(Protocol):
         self,
         goal: str,
         reason: str,
-        on_choice: Callable[[Literal["back_to_work", "relevant"]], None],
+        on_choice: Callable[[Literal["back_to_work", "relevant", "allow_domain"]], None],
     ) -> None: ...
     def show_layer2_warning(self, goal: str, reason: str) -> None: ...
     def show_strict_overlay(
@@ -70,6 +70,7 @@ class AgentStateMachine:
         on_override: Callable[[ActivityContext | None, str], None] | None = None,
         minimize_fn: Callable[[int], bool] | None = None,
         on_lockout_done: Callable[[], None] | None = None,
+        on_quick_rule: Callable[[Literal["allow", "block"], str], Any] | None = None,
     ) -> None:
         self.goal = goal
         self.mode: ModeType = mode
@@ -82,6 +83,7 @@ class AgentStateMachine:
         self.on_override = on_override
         self._minimize_fn = minimize_fn
         self.on_lockout_done = on_lockout_done
+        self.on_quick_rule = on_quick_rule
 
         self._lock = threading.RLock()
         self._state: AgentStateName = "IDLE"
@@ -108,6 +110,14 @@ class AgentStateMachine:
         with self._lock:
             return list(self._override_log)
 
+    def grace_remaining_seconds(self, now: float | None = None) -> float:
+        """Return remaining grace period seconds when in GRACE_PERIOD, else 0.0."""
+        current_time = self._now(now)
+        with self._lock:
+            if self._state != "GRACE_PERIOD" or self._grace_deadline is None:
+                return 0.0
+            return max(0.0, self._grace_deadline - current_time)
+
     def handle_verdict(
         self, ctx: ActivityContext | None, verdict: JudgeVerdict | None
     ) -> AgentDecision:
@@ -130,6 +140,7 @@ class AgentStateMachine:
         cache_key = self._safe_cache_key(source_key, display_title)
 
         ui_action: tuple[str, str] | None = None
+        layer1_source: str = ""
         decision: AgentDecision
 
         with self._lock:
@@ -208,6 +219,7 @@ class AgentStateMachine:
                         self._state = "LAYER_1_ASK"
                         message = f"Are you studying {self.goal}? Go back."
                         ui_action = ("layer1", reason)
+                        layer1_source = source_key
                         decision = AgentDecision(
                             state="LAYER_1_ASK",
                             action_taken="ask_popup",
@@ -252,13 +264,14 @@ class AgentStateMachine:
                         tabs_to_close=[],
                     )
 
-        self._dispatch_side_effects(decision, ui_action)
+        self._dispatch_side_effects(decision, ui_action, source_label=layer1_source)
         return decision
 
     def handle_tick(self, now: float | None = None) -> AgentDecision | None:
         """Check grace period and strict-mode lockout expirations on a periodic tick."""
         current_time = self._now(now)
         ui_action: tuple[str, str] | None = None
+        layer1_source: str = ""
         decision: AgentDecision | None = None
         lockout_completed = False
 
@@ -275,6 +288,7 @@ class AgentStateMachine:
                 self._strikes += 1
                 self._state = "LAYER_1_ASK"
                 reason = self._extract_last_reason()
+                layer1_source = self._extract_source_and_title(self._last_off_task_ctx)[0]
                 message = f"Are you studying {self.goal}? Go back."
                 ui_action = ("layer1", reason)
                 decision = AgentDecision(
@@ -294,7 +308,7 @@ class AgentStateMachine:
                 lockout_completed = True
 
         if decision is not None:
-            self._dispatch_side_effects(decision, ui_action)
+            self._dispatch_side_effects(decision, ui_action, source_label=layer1_source)
             if lockout_completed:
                 self._notify_lockout_done()
         return decision
@@ -313,9 +327,9 @@ class AgentStateMachine:
         return decision
 
     def handle_user_action(
-        self, action: Literal["back_to_work", "relevant"]
+        self, action: Literal["back_to_work", "relevant", "allow_domain"]
     ) -> AgentDecision:
-        """Handle user button clicks from Layer 1 popup, updating overrides and cache."""
+        """Handle user button clicks from Layer 1 popup, updating overrides, quick rules, and cache."""
         now = self._now()
         override_ctx: ActivityContext | None = None
         override_source = ""
@@ -346,15 +360,20 @@ class AgentStateMachine:
                     tabs_to_close=[],
                 )
                 ui_action: tuple[str, str] | None = ("hide", decision.message)
-            elif action == "relevant":
+            elif action in ("relevant", "allow_domain"):
                 override_ctx = self._last_off_task_ctx
                 override_source, override_title = self._extract_source_and_title(
                     override_ctx
                 )
-                override_reason = f"User marked relevant for {self.goal}"
+                override_reason = (
+                    f"User allowed {override_source or 'site'} for {self.goal}"
+                    if action == "allow_domain"
+                    else f"User marked relevant for {self.goal}"
+                )
                 if override_source or override_title:
                     key = self._safe_cache_key(override_source, override_title)
-                    self._pending_overrides.add(key)
+                    if action == "relevant":
+                        self._pending_overrides.add(key)
                     should_record_override = True
                 self._override_log.append(
                     {
@@ -371,10 +390,15 @@ class AgentStateMachine:
                 self._lockout_deadline = None
                 self._last_off_task_ctx = None
                 self._last_off_task_verdict = None
+                msg = (
+                    f"Always allowed {override_source} for this session."
+                    if action == "allow_domain" and override_source
+                    else "User marked activity relevant; override logged."
+                )
                 decision = AgentDecision(
                     state="ON_TASK",
                     action_taken="cleared",
-                    message="User marked activity relevant; override logged.",
+                    message=msg,
                     tabs_to_close=[],
                 )
                 ui_action = ("hide", decision.message)
@@ -387,13 +411,19 @@ class AgentStateMachine:
                     tabs_to_close=[],
                 )
 
-        if action == "relevant":
+        if action in ("relevant", "allow_domain"):
             logger.info(
-                "User override logged: source=%r title=%r reason=%r",
+                "User override logged (%s): source=%r title=%r reason=%r",
+                action,
                 override_source,
                 override_title,
                 override_reason,
             )
+            if action == "allow_domain" and override_source and self.on_quick_rule is not None:
+                try:
+                    self.on_quick_rule("allow", override_source)
+                except Exception:
+                    logger.exception("on_quick_rule callback failed")
             if should_record_override and self.cache is not None:
                 try:
                     self.cache.record_override(
@@ -493,6 +523,8 @@ class AgentStateMachine:
         self,
         decision: AgentDecision,
         ui_action: tuple[str, str] | None,
+        *,
+        source_label: str = "",
     ) -> None:
         """Invoke command queue, window minimize, UI hooks, and callbacks outside self._lock."""
         if decision.action_taken == "strict_block":
@@ -514,11 +546,20 @@ class AgentStateMachine:
             kind, payload = ui_action
             try:
                 if kind == "layer1" and hasattr(self.ui_hooks, "show_layer1_popup"):
-                    self.ui_hooks.show_layer1_popup(
-                        self.goal,
-                        payload,
-                        lambda choice: self.handle_user_action(choice),
-                    )
+                    choice_cb = lambda choice: self.handle_user_action(choice)
+                    try:
+                        self.ui_hooks.show_layer1_popup(
+                            self.goal,
+                            payload,
+                            choice_cb,
+                            source_label=source_label or None,  # type: ignore[call-arg]
+                        )
+                    except TypeError:
+                        self.ui_hooks.show_layer1_popup(
+                            self.goal,
+                            payload,
+                            choice_cb,
+                        )
                 elif kind == "layer2" and hasattr(self.ui_hooks, "show_layer2_warning"):
                     self.ui_hooks.show_layer2_warning(self.goal, payload)
                 elif kind == "strict" and hasattr(self.ui_hooks, "show_strict_overlay"):
@@ -735,5 +776,6 @@ class AgentStateMachine:
             tier_used=tier_used,
             from_cache=from_cache,
             rate_limited=bool(getattr(verdict, "rate_limited", False)),
+            model_used=str(getattr(verdict, "model_used", "") or ""),
         )
         return on_task, reason, from_cache, sanitized

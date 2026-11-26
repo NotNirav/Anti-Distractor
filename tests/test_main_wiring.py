@@ -589,3 +589,398 @@ def test_extension_connected_pause_resume_rules_and_theme_persistence(tmp_path: 
     assert controller2.engine.profile.blocked_apps == ["discord.exe"]
 
     controller2.shutdown()
+
+
+def test_tab_vault_pomodoro_presets_quick_rule_activity_feed_and_hud_pos(tmp_path: Path) -> None:
+    """Verify Tab Vault capture/DB, Pomodoro cycle transitions, presets, quick rules, activity feed & HUD pos."""
+    import json
+    import time
+    from app.logger import SessionLogger
+    from app.models import ClosedTabEntry, SessionKPIs, TabInfo, TabSnapshot, WindowInfo
+    from app.settings import AppSettings
+
+    class ExtendedFakeUI(FakeUI):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_hud_moved: Callable[[int, int], None] | None = None
+            self.setup_pomodoro_enabled: bool | None = None
+            self.reviews_with_extras: list[tuple[str, SessionKPIs | None, list[ClosedTabEntry] | None]] = []
+            self.reset_timer_calls: list[float] = []
+            self.grace_updates: list[float | None] = []
+            self.activity_items: list[Any] = []
+            self.overridden_items: list[tuple[int | None, str]] = []
+            self.prefs_history: list[tuple[int, bool]] = []
+            self.setup_progress: list[tuple[str, bool]] = []
+            self.setup_presets_count: int = 0
+
+        def configure_preferences(self, *, break_minutes: int | None = None, mute_sounds: bool | None = None) -> None:
+            self.prefs_history.append((break_minutes or 5, bool(mute_sounds)))
+
+        def show_setup(
+            self,
+            on_start: Callable[[str, int, ModeType], None],
+            initial_goal: str | None = None,
+            initial_duration: int | None = None,
+            initial_mode: ModeType | None = None,
+            on_edit_rules: Callable[[str], None] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            super().show_setup(
+                on_start=on_start,
+                initial_goal=initial_goal,
+                initial_duration=initial_duration,
+                initial_mode=initial_mode,
+                on_edit_rules=on_edit_rules,
+            )
+            presets = kwargs.get("presets") or []
+            self.setup_presets_count = len(presets)
+
+        def show_monitoring_hud(
+            self,
+            goal: str,
+            mode: ModeType,
+            on_end_session: Callable[[], None],
+            duration_minutes: int | None = None,
+            on_toggle_pause: Callable[[], None] | None = None,
+            on_open_rules: Callable[[], None] | None = None,
+            on_quit: Callable[[], None] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            self.end_session_cb = on_end_session
+
+        def update_setup_progress(self, stage_text: str, running: bool = True) -> None:
+            self.setup_progress.append((stage_text, running))
+
+        def update_pause_status(
+            self, paused: bool, remaining_seconds: float = 0.0, summary: str | None = None
+        ) -> None:
+            self.pause_updates.append((paused, remaining_seconds, summary))  # type: ignore[arg-type]
+
+        def reset_hud_timer(self, duration_seconds: float) -> None:
+            self.reset_timer_calls.append(duration_seconds)
+
+        def update_grace_countdown(self, remaining_seconds: float | None) -> None:
+            self.grace_updates.append(remaining_seconds)
+
+        def append_activity_item(self, item: Any, on_mark_relevant: Callable[[Any], None] | None = None) -> None:
+            self.activity_items.append(item)
+
+        def mark_activity_overridden(self, log_id: int | None, source_key: str = "") -> None:
+            self.overridden_items.append((log_id, source_key))
+
+        def clear_activity_items(self) -> None:
+            self.activity_items.clear()
+
+        def show_review(
+            self,
+            review_text: str,
+            on_close: Callable[[], None],
+            on_new_session: Callable[[], None] | None = None,
+            *,
+            kpis: SessionKPIs | None = None,
+            closed_tabs: list[ClosedTabEntry] | None = None,
+        ) -> None:
+            self.reviews.append(review_text)
+            self.reviews_with_extras.append((review_text, kpis, closed_tabs))
+            self.review_close_cb = on_close
+
+    db_file = tmp_path / "pomo_vault.db"
+    env_file = tmp_path / ".env"
+    env_file.write_text("GEMINI_API_KEY=initial_key\n", encoding="utf-8")
+
+    ui = ExtendedFakeUI()
+    controller = AppController(
+        ui=ui,  # type: ignore[arg-type]
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(db_file),
+        env_path=str(env_file),
+        enable_os_hotkeys=False,
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+        profile_fn=lambda goal, _key: GoalProfile(
+            goal=goal,
+            on_task_topics=["algo"],
+            allowed_domains=["leetcode.com"],
+            borderline_domains=["youtube.com"],
+            blocked_domains=["reddit.com"],
+            allowed_apps=["code.exe"],
+            blocked_apps=["spotify.exe"],
+        ),
+        review_fn=lambda goal, mode, logs, _key: f"Review for {goal} ({len(logs)} events)",
+        schedule_fn=lambda _delay, _cb: 1,
+        cancel_schedule_fn=lambda _h: None,
+    )
+
+    controller.start()
+    assert ui.setup_presets_count == 3  # 3 starter presets seeded
+
+    # Persist HUD position into last_session.json and verify reload
+    assert ui.on_hud_moved is not None
+    ui.on_hud_moved(-640, 120)
+    saved = json.loads((tmp_path / "last_session.json").read_text(encoding="utf-8"))
+    assert saved["hud_x"] == -640 and saved["hud_y"] == 120
+
+    # Apply Settings (enables Pomodoro 2 cycles + 5m break + mute)
+    controller.apply_settings(
+        AppSettings(
+            break_minutes=5,
+            mute_sounds=True,
+            timing_preset="dev",
+            hotkeys_enabled=False,
+            pomodoro_enabled=True,
+            pomodoro_cycles=2,
+        )
+    )
+    assert controller.settings.mute_sounds is True
+    assert ui.prefs_history[-1] == (5, True)
+
+    # Select starter preset -> pre-populates draft profile cleanly
+    preset0 = controller.presets_store.list_presets()[0]
+    controller._on_select_preset(preset0)
+    controller.start_session(preset0.goal, 25, "strict")
+    controller.wait_for_startup()
+    assert controller.engine.profile.allowed_domains == preset0.profile.allowed_domains
+
+    # Trigger strict_block on tab 77 -> records into Closed Tabs Vault + Activity Feed
+    assert controller.tab_store is not None
+    reddit_tab = TabInfo(
+        tab_id=77,
+        window_id=1,
+        title="r/funny - Reddit",
+        url="https://www.reddit.com/r/funny",
+        domain="reddit.com",
+        active=True,
+    )
+    controller.tab_store.update(TabSnapshot(tabs=[reddit_tab], active_tab_id=77, window_focused=True, updated_at=10.0))
+    win = WindowInfo(hwnd=55, title="Reddit - Chrome", process_name="chrome.exe", pid=999, is_browser=True)
+    ctx = ActivityContext(
+        trigger_type="tab_activated",
+        goal=preset0.goal,
+        foreground_window=win,
+        tab_snapshot=controller.tab_store.get_latest(),
+        open_windows=[],
+        source_key="reddit.com",
+        display_title="r/funny - Reddit",
+        active_url="https://www.reddit.com/r/funny",
+        timestamp=100.0,
+    )
+    off_verdict = JudgeVerdict(
+        activity="Reddit",
+        on_task=False,
+        confidence=0.95,
+        reason="Distracting social feed",
+        tabs_to_close=[77],
+        tier_used=0,
+    )
+    controller.engine.on_verdict(ctx, off_verdict)  # -> GRACE_PERIOD
+    assert controller.state_machine is not None
+    controller.state_machine._grace_deadline = time.monotonic() - 1.0  # expire grace
+    controller.engine.on_verdict(ctx, off_verdict)  # -> LAYER_1_ASK
+    controller.engine.on_verdict(ctx, off_verdict)  # -> LAYER_2_ULTIMATUM (strict_block closing tab 77)
+
+    assert len(controller._closed_tabs_vault) == 1
+    assert controller._closed_tabs_vault[0].url == "https://www.reddit.com/r/funny"
+    assert len(ui.activity_items) >= 1
+
+    # Quick-rule allows domain live and clears cache
+    controller.cache.record_override("reddit.com", "r/funny - Reddit")
+    qr = controller.apply_quick_rule("allow", "https://www.reddit.com/r/funny")
+    assert qr["ok"] is True and qr["domain_rule"] == "allowed"
+    assert "reddit.com" in controller.engine.profile.allowed_domains
+
+    # Mark activity item relevant updates feed + SQLite
+    feed_item = ui.activity_items[-1]
+    controller.mark_activity_item_relevant(feed_item)
+    assert len(ui.overridden_items) >= 1
+
+    # Pomodoro Loop: expire cycle 1 work -> enters cycle 1/2 break -> expire break -> cycle 2 work -> expire -> review
+    controller._session_deadline = time.monotonic() - 1.0
+    controller._on_tick()
+    assert controller._paused is True
+    assert ui.pause_updates[-1][0] is True
+    assert "Cycle 1/2 complete" in str(ui.pause_updates[-1][2])
+
+    controller._pause_until = time.monotonic() - 1.0
+    controller._on_tick()
+    assert controller._paused is False
+    assert controller._pomodoro_cycle == 2
+    assert len(ui.reset_timer_calls) == 1
+    assert any("Pomodoro 2/2" in msg for _, msg in ui.hud_updates)
+
+    # Expire final cycle 2 -> ends session & passes KPIs + Closed Tabs Vault to review & SQLite
+    controller._session_deadline = time.monotonic() - 1.0
+    controller._on_tick()
+    controller.wait_for_review()
+
+    assert controller.session_active is False
+    assert len(ui.reviews_with_extras) >= 1
+    _rev_txt, kpis, vault_entries = ui.reviews_with_extras[-1]
+    assert kpis is not None and kpis.total_checks >= 3
+    assert vault_entries is not None and len(vault_entries) == 1
+    assert vault_entries[0].url == "https://www.reddit.com/r/funny"
+
+    persisted_sessions = SessionLogger(db_path=str(db_file)).list_sessions_summary()
+    assert len(persisted_sessions) == 1
+    assert len(persisted_sessions[0]["closed_tabs"]) == 1
+
+    # Fresh controller picks up persisted hud_x / hud_y automatically
+    ui2 = ExtendedFakeUI()
+    controller2 = AppController(
+        ui=ui2,  # type: ignore[arg-type]
+        timings=DEV_TIMINGS,
+        api_key="mock_key",
+        db_path=str(db_file),
+        env_path=str(env_file),
+        enable_os_hotkeys=False,
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+    )
+    controller2.start()
+    assert controller2._hud_pos == (-640, 120)
+
+    controller.shutdown()
+    controller2.shutdown()
+    assert controller.hotkey_manager.is_running is False
+
+
+def test_first_launch_api_key_onboarding_skip_and_clear_lifecycle(tmp_path: Path, monkeypatch) -> None:
+    """Verify onboarding launches when GEMINI_API_KEY is missing/placeholder, persists key, and handles Skip & Remove."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    class OnboardingFakeUI(FakeUI):
+        def __init__(self) -> None:
+            super().__init__()
+            self.onboarding_calls: list[dict[str, Any]] = []
+            self.setup_calls: list[dict[str, Any]] = []
+            self.api_badge_updates: list[tuple[bool, str]] = []
+            self.setup_progress_msgs: list[tuple[str, bool]] = []
+
+        def show_onboarding(
+            self,
+            *,
+            on_save_key: Callable[[str], tuple[bool, str]],
+            on_test_key: Callable[[str, Callable[[bool, str], None]], None] | None = None,
+            on_continue: Callable[[], None],
+            on_skip: Callable[[], None],
+            initial_key: str = "",
+        ) -> None:
+            self.onboarding_calls.append(
+                {
+                    "on_save_key": on_save_key,
+                    "on_test_key": on_test_key,
+                    "on_continue": on_continue,
+                    "on_skip": on_skip,
+                    "initial_key": initial_key,
+                }
+            )
+
+        def show_setup(
+            self,
+            on_start: Callable[[str, int, ModeType], None],
+            initial_goal: str | None = None,
+            initial_duration: int | None = None,
+            initial_mode: ModeType | None = None,
+            on_edit_rules: Callable[[str], None] | None = None,
+            **extra: Any,
+        ) -> None:
+            super().show_setup(on_start, initial_goal, initial_duration, initial_mode, on_edit_rules)
+            self.setup_calls.append(extra)
+
+        def update_setup_api_key_status(self, api_key_status: tuple[bool, str]) -> None:
+            self.api_badge_updates.append(api_key_status)
+
+        def update_setup_progress(self, stage_text: str, running: bool = True) -> None:
+            self.setup_progress_msgs.append((stage_text, running))
+
+    db_file = tmp_path / "sessions.db"
+    env_file = tmp_path / ".env"
+
+    # 1. Placeholder key triggers onboarding instead of Setup
+    ui1 = OnboardingFakeUI()
+    c1 = AppController(
+        ui=ui1,  # type: ignore[arg-type]
+        timings=DEV_TIMINGS,
+        api_key="your_gemini_api_key_here",
+        db_path=str(db_file),
+        env_path=str(env_file),
+        fake_judge=False,
+        enable_os_hotkeys=False,
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+    )
+    c1.start()
+    assert len(ui1.onboarding_calls) == 1
+    assert len(ui1.setup_calls) == 0
+
+    # Reject placeholder key inside onboarding save callback
+    ok_bad, _msg_bad = ui1.onboarding_calls[0]["on_save_key"]("your_gemini_api_key_here")
+    assert ok_bad is False
+
+    # Saving real key updates .env + controller.api_key and transitions to Setup with Key ✓ status
+    ok_good, status_good = ui1.onboarding_calls[0]["on_save_key"]("AIzaSyTestOnboarding9876")
+    assert ok_good is True
+    assert "9876" in status_good
+    assert c1.api_key == "AIzaSyTestOnboarding9876"
+    assert "GEMINI_API_KEY=AIzaSyTestOnboarding9876" in env_file.read_text(encoding="utf-8")
+
+    ui1.onboarding_calls[0]["on_continue"]()
+    assert len(ui1.setup_calls) == 1
+    assert ui1.setup_calls[-1]["api_key_status"][0] is True
+
+    # 2. Removing the key clears .env and updates badge live
+    cleared_ok, cleared_msg = c1._clear_api_key()
+    assert cleared_ok is False
+    assert cleared_msg == "Not configured"
+    assert c1.api_key == ""
+    assert "GEMINI_API_KEY=" not in env_file.read_text(encoding="utf-8")
+    assert ui1.api_badge_updates[-1] == (False, "Not configured")
+    c1.shutdown()
+
+    # 3. Skipping onboarding persists onboarding_skipped=True so next launch goes straight to Setup
+    ui2 = OnboardingFakeUI()
+    c2 = AppController(
+        ui=ui2,  # type: ignore[arg-type]
+        timings=DEV_TIMINGS,
+        api_key="",
+        db_path=str(db_file),
+        env_path=str(env_file),
+        fake_judge=False,
+        enable_os_hotkeys=False,
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+    )
+    c2.start()
+    assert len(ui2.onboarding_calls) == 1
+    ui2.onboarding_calls[0]["on_skip"]()
+    assert c2.settings.onboarding_skipped is True
+    assert len(ui2.setup_calls) == 1
+    assert ui2.setup_calls[-1]["api_key_status"] == (False, "Not configured")
+    c2.shutdown()
+
+    ui3 = OnboardingFakeUI()
+    c3 = AppController(
+        ui=ui3,  # type: ignore[arg-type]
+        timings=DEV_TIMINGS,
+        api_key="",
+        db_path=str(db_file),
+        env_path=str(env_file),
+        fake_judge=False,
+        enable_os_hotkeys=False,
+        engine_cls=FakeEngine,  # type: ignore[arg-type]
+        watcher_cls=FakeWatcher,  # type: ignore[arg-type]
+        server_starter=lambda _app, host="127.0.0.1", port=8765: FakeServerHandle(),
+        app_factory=lambda **kwargs: object(),
+    )
+    c3.start()
+    assert len(ui3.onboarding_calls) == 0
+    assert len(ui3.setup_calls) == 1
+    c3.shutdown()

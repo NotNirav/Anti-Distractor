@@ -1,4 +1,4 @@
-"""Tkinter UI components: setup, monitoring HUD, Layer 1/2 popups, strict overlay, rules editor, tray, and review."""
+"""Tkinter UI components: setup, monitoring HUD, Layer 1/2 popups, strict overlay, rules editor, tray, dialogs, and review."""
 
 from __future__ import annotations
 
@@ -11,16 +11,47 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any, Callable, Literal, Protocol
+import webbrowser
 
-from app.models import AgentStateName, GoalProfile, ModeType
+from app.models import (
+    ActivityFeedItem,
+    AgentStateName,
+    ClosedTabEntry,
+    GoalProfile,
+    ModeType,
+    SessionKPIs,
+)
 from app.profile import normalize_domain
+from app.settings import AppSettings, FocusPreset
 from app.tray import SystemTrayManager
+from app.ui_dialogs import (
+    ActivityDrawerDialog,
+    HistoryAnalyticsDialog,
+    SettingsDialog,
+    ToolTip,
+)
+from app.win32_ui import (
+    apply_brand_icon,
+    apply_dark_titlebar,
+    apply_noactivate_topmost,
+    get_monitor_work_area,
+)
 
 logger = logging.getLogger(__name__)
 
 ThemeType = Literal["light", "dark"]
+ButtonVariant = Literal[
+    "primary",
+    "secondary",
+    "danger",
+    "danger_outline",
+    "warning_outline",
+    "success_outline",
+    "ghost",
+    "chip",
+]
 
 
 class UIHooks(Protocol):
@@ -56,7 +87,7 @@ class UIHooks(Protocol):
         self,
         goal: str,
         reason: str,
-        on_choice: Callable[[Literal["back_to_work", "relevant"]], None],
+        on_choice: Callable[[Literal["back_to_work", "relevant", "allow_domain"]], None],
     ) -> None: ...
     def show_layer2_warning(self, goal: str, reason: str) -> None: ...
     def show_strict_overlay(
@@ -162,6 +193,28 @@ STATE_COLORS: dict[AgentStateName, tuple[str, str]] = {
 }
 
 
+def _resolve_variant_colors(
+    variant: ButtonVariant,
+    pal: dict[str, str],
+) -> tuple[str, str, str, str, int]:
+    """Return (bg, hover_bg, fg, bd_color, highlightthickness) for a button variant."""
+    if variant == "primary":
+        return pal["primary"], pal["primary_hover"], "#FFFFFF", pal["primary"], 0
+    if variant == "danger":
+        return pal["danger"], pal["danger_hover"], "#FFFFFF", pal["danger"], 0
+    if variant == "danger_outline":
+        return pal["danger_soft"], pal["danger_border"], pal["danger"], pal["danger_border"], 1
+    if variant == "warning_outline":
+        return pal["warning_soft"], pal["warning_border"], pal["warning"], pal["warning_border"], 1
+    if variant == "success_outline":
+        return pal["success_soft"], pal["success_border"], pal["success"], pal["success_border"], 1
+    if variant == "ghost":
+        return pal["surface"], pal["btn_secondary_hover"], pal["text_secondary"], pal["surface"], 0
+    if variant == "chip":
+        return pal["surface_alt"], pal["primary_soft"], pal["text_secondary"], pal["border_strong"], 1
+    return pal["btn_secondary_bg"], pal["btn_secondary_hover"], pal["text"], pal["border_strong"], 1
+
+
 def _bind_hover(
     widget: tk.Widget,
     normal_bg: str,
@@ -169,23 +222,36 @@ def _bind_hover(
     normal_fg: str | None = None,
     hover_fg: str | None = None,
 ) -> None:
-    """Attach clean hover color transitions to a flat tk.Button or tk.Label."""
+    """Attach mutable hover color transitions to a flat tk.Button or tk.Label without stacking bindings."""
+    cfg = {
+        "normal_bg": normal_bg,
+        "hover_bg": hover_bg,
+        "normal_fg": normal_fg,
+        "hover_fg": hover_fg,
+    }
+    setattr(widget, "_hover_cfg", cfg)
+
+    if getattr(widget, "_hover_bound", False):
+        return
+    setattr(widget, "_hover_bound", True)
 
     def _on_enter(_event: tk.Event) -> None:
         try:
             if str(widget.cget("state")) == "disabled":
                 return
-            widget.configure(bg=hover_bg)
-            if hover_fg is not None:
-                widget.configure(fg=hover_fg)
+            cur = getattr(widget, "_hover_cfg", cfg)
+            widget.configure(bg=cur["hover_bg"])
+            if cur["hover_fg"] is not None:
+                widget.configure(fg=cur["hover_fg"])
         except Exception:
             pass
 
     def _on_leave(_event: tk.Event) -> None:
         try:
-            widget.configure(bg=normal_bg)
-            if normal_fg is not None:
-                widget.configure(fg=normal_fg)
+            cur = getattr(widget, "_hover_cfg", cfg)
+            widget.configure(bg=cur["normal_bg"])
+            if cur["normal_fg"] is not None:
+                widget.configure(fg=cur["normal_fg"])
         except Exception:
             pass
 
@@ -193,12 +259,36 @@ def _bind_hover(
     widget.bind("<Leave>", _on_leave, add="+")
 
 
+def _set_button_variant(
+    btn: tk.Button,
+    variant: ButtonVariant,
+    *,
+    text: str | None = None,
+    palette: dict[str, str] | None = None,
+) -> None:
+    """Update a button's visual variant AND sync its hover metadata so <Leave> never reverts stale colors."""
+    pal = palette or PALETTE
+    bg, hover_bg, fg, bd_color, hl_thick = _resolve_variant_colors(variant, pal)
+    kwargs: dict[str, Any] = {
+        "bg": bg,
+        "fg": fg,
+        "activebackground": hover_bg,
+        "activeforeground": fg,
+        "highlightthickness": hl_thick,
+        "highlightbackground": bd_color,
+    }
+    if text is not None:
+        kwargs["text"] = text
+    btn.configure(**kwargs)
+    _bind_hover(btn, bg, hover_bg, fg, fg)
+
+
 def _make_button(
     parent: tk.Misc,
     text: str,
     command: Callable[[], None],
     *,
-    variant: Literal["primary", "secondary", "danger", "danger_outline", "warning_outline", "ghost", "chip"] = "secondary",
+    variant: ButtonVariant = "secondary",
     font: tuple[str, int] | tuple[str, int, str] = ("Segoe UI", 9, "bold"),
     padx: int = 14,
     pady: int = 7,
@@ -207,27 +297,7 @@ def _make_button(
 ) -> tk.Button:
     """Create a consistently styled flat modern tk.Button with hover feedback."""
     pal = palette or PALETTE
-    if variant == "primary":
-        bg, hover_bg, fg = pal["primary"], pal["primary_hover"], "#FFFFFF"
-        bd_color = pal["primary"]
-    elif variant == "danger":
-        bg, hover_bg, fg = pal["danger"], pal["danger_hover"], "#FFFFFF"
-        bd_color = pal["danger"]
-    elif variant == "danger_outline":
-        bg, hover_bg, fg = pal["danger_soft"], pal["danger_border"], pal["danger"]
-        bd_color = pal["danger_border"]
-    elif variant == "warning_outline":
-        bg, hover_bg, fg = pal["warning_soft"], pal["warning_border"], pal["warning"]
-        bd_color = pal["warning_border"]
-    elif variant == "ghost":
-        bg, hover_bg, fg = pal["surface"], pal["btn_secondary_hover"], pal["text_secondary"]
-        bd_color = pal["surface"]
-    elif variant == "chip":
-        bg, hover_bg, fg = pal["surface_alt"], pal["primary_soft"], pal["text_secondary"]
-        bd_color = pal["border_strong"]
-    else:  # secondary
-        bg, hover_bg, fg = pal["btn_secondary_bg"], pal["btn_secondary_hover"], pal["text"]
-        bd_color = pal["border_strong"]
+    bg, hover_bg, fg, bd_color, hl_thick = _resolve_variant_colors(variant, pal)
 
     btn = tk.Button(
         parent,
@@ -241,7 +311,7 @@ def _make_button(
         disabledforeground="#E2E8F0" if variant in ("primary", "danger") else pal["text_muted"],
         relief="flat",
         bd=0,
-        highlightthickness=1 if variant in ("secondary", "danger_outline", "warning_outline", "chip") else 0,
+        highlightthickness=hl_thick,
         highlightbackground=bd_color,
         highlightcolor=pal["primary"],
         padx=padx,
@@ -249,7 +319,7 @@ def _make_button(
         cursor="hand2",
     )
     if bind_hover:
-        _bind_hover(btn, bg, hover_bg)
+        _bind_hover(btn, bg, hover_bg, fg, fg)
     return btn
 
 
@@ -260,6 +330,7 @@ class TkinterUI:
         self,
         root: tk.Tk | None = None,
         tray_factory: Callable[..., SystemTrayManager] | None = None,
+        url_opener: Callable[[str], Any] | None = None,
     ) -> None:
         self._owns_root = root is None
         self.root = root if root is not None else tk.Tk()
@@ -267,22 +338,45 @@ class TkinterUI:
         self._queue: queue.Queue[Callable[[], None]] = queue.Queue()
         self._tray_factory = tray_factory or SystemTrayManager
         self._tray: SystemTrayManager | None = None
+        self._url_opener: Callable[[str], Any] = url_opener or webbrowser.open
 
         self._theme: ThemeType = "light"
         self.on_theme_changed: Callable[[ThemeType], None] | None = None
+        self.on_hud_moved: Callable[[int, int], None] | None = None
+
+        # Configurable runtime preferences
+        self._break_minutes: int = 5
+        self._mute_sounds: bool = False
+        self._hud_saved_pos: tuple[int, int] | None = None
 
         self._configure_theme()
 
-        self._active_screen: Literal["none", "setup", "hud", "review"] = "none"
+        self._active_screen: Literal["none", "onboarding", "setup", "hud", "review"] = "none"
         self._current_frame: tk.Frame | None = None
         self._theme_btn: tk.Button | None = None
+
+        # Onboarding live state for seamless theme switches
+        self._onboarding_callbacks: dict[str, Any] = {}
+        self._onboarding_key_var: tk.StringVar | None = None
+        self._onboarding_show_key: bool = False
+        self._onboarding_key_entry: ttk.Entry | None = None
+        self._onboarding_show_btn: tk.Button | None = None
+        self._onboarding_feedback_lbl: tk.Label | None = None
+        self._onboarding_test_btn: tk.Button | None = None
+        self._onboarding_save_btn: tk.Button | None = None
+        self._onboarding_skip_btn: tk.Button | None = None
 
         # Setup live state for seamless theme switches
         self._setup_on_start: Callable[[str, int, ModeType], None] | None = None
         self._setup_on_edit_rules: Callable[[str], None] | None = None
+        self._setup_extra_kwargs: dict[str, Any] = {}
         self._setup_goal_var: tk.StringVar | None = None
         self._setup_dur_var: tk.StringVar | None = None
         self._setup_mode_var: tk.StringVar | None = None
+        self._setup_pomodoro_var: tk.BooleanVar | None = None
+        self._setup_progress_bar: ttk.Progressbar | None = None
+        self._setup_api_key_btn: tk.Button | None = None
+        self._setup_api_key_tooltip: ToolTip | None = None
 
         # HUD live state & widgets
         self._hud_state_label: tk.Label | None = None
@@ -296,28 +390,48 @@ class TkinterUI:
         self._hud_pin_btn: tk.Button | None = None
         self._hud_pause_btn: tk.Button | None = None
         self._hud_rules_btn: tk.Button | None = None
+        self._hud_activity_btn: tk.Button | None = None
         self._hud_tray_btn: tk.Button | None = None
+        self._hud_mini_btn: tk.Button | None = None
+        self._hud_startup_bar: ttk.Progressbar | None = None
+        self._hud_tooltips: list[ToolTip] = []
 
         self._hud_pinned: bool = True
+        self._hud_mini_mode: bool = False
         self._hud_deadline: float | None = None
         self._hud_session_remaining_on_pause: float | None = None
         self._hud_timer_after_id: str | None = None
         self._hud_paused: bool = False
         self._hud_pause_remaining: float = 0.0
+        self._hud_grace_remaining: float | None = None
         self._hud_ext_connected: bool = False
         self._hud_last_goal: str = ""
         self._hud_last_mode: ModeType = "strict"
         self._hud_last_state: AgentStateName = "ON_TASK"
         self._hud_last_summary: str = "Monitoring active."
+        self._hud_pause_summary: str = "Break active — monitoring paused."
         self._hud_t1_count: int = 0
         self._hud_t2_count: int = 0
         self._hud_callbacks: dict[str, Any] = {}
+
+        # Live Activity Feed & Secondary Dialogs
+        self._activity_items: list[ActivityFeedItem] = []
+        self._activity_mark_relevant_cb: Callable[[ActivityFeedItem], None] | None = None
+        self._activity_drawer: ActivityDrawerDialog | None = None
+        self._history_dialog: HistoryAnalyticsDialog | None = None
+        self._settings_dialog: SettingsDialog | None = None
 
         # Review live state & widgets
         self._review_text_widget: tk.Text | None = None
         self._review_sub_label: tk.Label | None = None
         self._review_copy_btn: tk.Button | None = None
+        self._review_export_btn: tk.Button | None = None
+        self._review_progress_bar: ttk.Progressbar | None = None
+        self._review_kpi_holder: tk.Frame | None = None
+        self._review_vault_holder: tk.Frame | None = None
         self._review_raw_text: str = ""
+        self._review_kpis: SessionKPIs | None = None
+        self._review_closed_tabs: list[ClosedTabEntry] = []
         self._review_callbacks: dict[str, Any] = {}
 
         # Popups / rules editor / strict overlay
@@ -347,13 +461,55 @@ class TkinterUI:
     def theme(self) -> ThemeType:
         return self._theme
 
+    @property
+    def setup_pomodoro_enabled(self) -> bool:
+        if self._setup_pomodoro_var is not None:
+            try:
+                return bool(self._setup_pomodoro_var.get())
+            except Exception:
+                return False
+        return False
+
+    def configure_preferences(
+        self,
+        *,
+        break_minutes: int | None = None,
+        mute_sounds: bool | None = None,
+        hud_pos: tuple[int, int] | None = None,
+    ) -> None:
+        """Update break duration, mute flag, and remembered HUD position safely."""
+        if break_minutes is not None:
+            self._break_minutes = max(1, int(break_minutes))
+        if mute_sounds is not None:
+            self._mute_sounds = bool(mute_sounds)
+        if hud_pos is not None:
+            self._hud_saved_pos = (int(hud_pos[0]), int(hud_pos[1]))
+
+        def _sync_btn() -> None:
+            if (
+                self._active_screen == "hud"
+                and not self._hud_paused
+                and self._hud_pause_btn is not None
+                and self._hud_pause_btn.winfo_exists()
+                and not self._hud_mini_mode
+            ):
+                self._hud_pause_btn.configure(text=f"Pause {self._break_minutes}m")
+
+        if threading.get_ident() == self._main_thread_id:
+            _sync_btn()
+        else:
+            self.dispatch(_sync_btn)
+
     def _configure_theme(self) -> None:
-        """Apply consistent colors to root and ttk widgets for the active theme."""
+        """Apply consistent colors, brand icon, and native dark/light titlebar to root and ttk styles."""
         pal = self._active_palette()
+        dark = self._theme == "dark"
         try:
             self.root.configure(bg=pal["bg"])
         except Exception:
             pass
+        apply_brand_icon(self.root)
+        apply_dark_titlebar(self.root, dark=dark)
         try:
             style = ttk.Style(self.root)
             if "clam" in style.theme_names():
@@ -374,8 +530,34 @@ class TkinterUI:
                 lightcolor=[("focus", pal["primary"])],
                 darkcolor=[("focus", pal["primary"])],
             )
+            style.configure(
+                "Brand.Horizontal.TProgressbar",
+                troughcolor=pal["surface_alt"],
+                background=pal["primary"],
+                bordercolor=pal["border"],
+                lightcolor=pal["primary"],
+                darkcolor=pal["primary"],
+                thickness=6,
+            )
         except Exception:
             pass
+
+    def _sync_open_toplevel_titlebars(self) -> None:
+        dark = self._theme == "dark"
+        candidates: list[tk.Misc | None] = [
+            self._rules_editor_win,
+            self._activity_drawer.win if self._activity_drawer is not None else None,
+            self._history_dialog.win if self._history_dialog is not None else None,
+            self._settings_dialog.win if self._settings_dialog is not None else None,
+            *self._active_popups,
+        ]
+        for w in candidates:
+            if w is not None:
+                try:
+                    if w.winfo_exists():
+                        apply_dark_titlebar(w, dark=dark)
+                except Exception:
+                    pass
 
     def set_theme(self, theme: ThemeType) -> None:
         """Switch UI theme ('light' or 'dark') and re-render the current view in place."""
@@ -387,8 +569,18 @@ class TkinterUI:
                 return
             self._theme = theme
             self._configure_theme()
+            self._sync_open_toplevel_titlebars()
 
-            if self._active_screen == "setup" and self._setup_on_start is not None:
+            if self._active_screen == "onboarding" and "on_save_key" in self._onboarding_callbacks:
+                cur_key = self._onboarding_key_var.get() if self._onboarding_key_var is not None else ""
+                self._render_onboarding_now(
+                    on_save_key=self._onboarding_callbacks["on_save_key"],
+                    on_test_key=self._onboarding_callbacks.get("on_test_key"),
+                    on_continue=self._onboarding_callbacks["on_continue"],
+                    on_skip=self._onboarding_callbacks["on_skip"],
+                    initial_key=cur_key,
+                )
+            elif self._active_screen == "setup" and self._setup_on_start is not None:
                 cur_goal = self._setup_goal_var.get() if self._setup_goal_var is not None else None
                 cur_dur_raw = self._setup_dur_var.get() if self._setup_dur_var is not None else None
                 try:
@@ -397,12 +589,17 @@ class TkinterUI:
                     cur_dur = None
                 cur_mode = self._setup_mode_var.get() if self._setup_mode_var is not None else None
                 resolved_mode: ModeType | None = cur_mode if cur_mode in ("strict", "normal") else None  # type: ignore[assignment]
+                cur_pomo = self._setup_pomodoro_var.get() if self._setup_pomodoro_var is not None else None
+                merged_extra = dict(self._setup_extra_kwargs)
+                if cur_pomo is not None:
+                    merged_extra["initial_pomodoro"] = bool(cur_pomo)
                 self._render_setup_now(
                     self._setup_on_start,
                     initial_goal=cur_goal,
                     initial_duration=cur_dur,
                     initial_mode=resolved_mode,
                     on_edit_rules=self._setup_on_edit_rules,
+                    **merged_extra,
                 )
             elif self._active_screen == "hud" and "on_end_session" in self._hud_callbacks:
                 prev_pos: tuple[int, int] | None = None
@@ -418,6 +615,7 @@ class TkinterUI:
                     duration_minutes=None,
                     on_toggle_pause=self._hud_callbacks.get("on_toggle_pause"),
                     on_open_rules=self._hud_callbacks.get("on_open_rules"),
+                    on_open_activity=self._hud_callbacks.get("on_open_activity"),
                     on_quit=self._hud_callbacks.get("on_quit"),
                     preserve_state=True,
                     preserve_pos=prev_pos,
@@ -428,6 +626,8 @@ class TkinterUI:
                     self._review_raw_text,
                     on_close=self._review_callbacks["on_close"],
                     on_new_session=self._review_callbacks.get("on_new_session"),
+                    kpis=self._review_kpis,
+                    closed_tabs=self._review_closed_tabs,
                 )
 
         if threading.get_ident() == self._main_thread_id:
@@ -483,6 +683,28 @@ class TkinterUI:
 
         return 0, 0, screen_w, screen_h, screen_w, screen_h
 
+    def _get_hud_monitor_work_area(self) -> tuple[int, int, int, int]:
+        """Return work area (left, top, right, bottom) of whichever monitor currently hosts the HUD."""
+        try:
+            sw = max(640, int(self.root.winfo_screenwidth()))
+            sh = max(480, int(self.root.winfo_screenheight()))
+        except Exception:
+            sw, sh = 1920, 1080
+        fallback = (0, 0, sw, max(400, sh - self._s(48)))
+
+        anchor: tuple[int, int] | None = None
+        if self._active_screen == "hud":
+            try:
+                if self.root.state() != "withdrawn":
+                    anchor = (int(self.root.winfo_x()), int(self.root.winfo_y()))
+            except Exception:
+                pass
+        if anchor is None and self._hud_saved_pos is not None:
+            anchor = self._hud_saved_pos
+        if anchor is None:
+            return fallback
+        return get_monitor_work_area(anchor[0] + 40, anchor[1] + 20, fallback=fallback)
+
     def _reset_window_state(
         self,
         win: tk.Tk | tk.Toplevel,
@@ -537,14 +759,16 @@ class TkinterUI:
         *,
         pos: Literal["center", "upper_center", "top_right", "bottom_right"] = "center",
         explicit_pos: tuple[int, int] | None = None,
+        monitor_rect: tuple[int, int, int, int] | None = None,
         pad_w: int = 8,
         pad_h: int = 8,
         allow_resize: bool = True,
     ) -> tuple[int, int]:
-        """Compute DPI-aware, content-fitting geometry so buttons/labels never clip."""
+        """Compute DPI-aware, multi-monitor-aware geometry so buttons/labels never clip."""
         win.update_idletasks()
         screen_w = max(640, win.winfo_screenwidth())
         screen_h = max(480, win.winfo_screenheight())
+        vx, vy, vw, vh, _pw, _ph = self._get_virtual_screen_bounds()
 
         req_w = win.winfo_reqwidth()
         req_h = win.winfo_reqheight()
@@ -552,27 +776,50 @@ class TkinterUI:
         scaled_w = self._s(min_w)
         scaled_h = self._s(min_h)
 
-        target_w = min(screen_w - 40, max(scaled_w, req_w + pad_w))
-        target_h = min(screen_h - 80, max(scaled_h, req_h + pad_h))
-
-        if explicit_pos is not None:
-            x = max(0, min(screen_w - target_w, explicit_pos[0]))
-            y = max(0, min(screen_h - target_h, explicit_pos[1]))
+        if monitor_rect is not None:
+            m_left, m_top, m_right, m_bottom = monitor_rect
+            avail_w = max(360, m_right - m_left - 24)
+            avail_h = max(220, m_bottom - m_top - 24)
         else:
-            margin = self._s(20)
-            taskbar_pad = self._s(68)
+            m_left, m_top, m_right, m_bottom = 0, 0, screen_w, screen_h
+            avail_w = screen_w - 40
+            avail_h = screen_h - 80
+
+        target_w = min(avail_w, max(scaled_w, req_w + pad_w))
+        target_h = min(avail_h, max(scaled_h, req_h + pad_h))
+
+        placed_explicit = False
+        if explicit_pos is not None:
+            ex, ey = int(explicit_pos[0]), int(explicit_pos[1])
+            # Validate saved coordinates are still on an attached monitor
+            visible_margin = 48
+            if (
+                ex + target_w >= vx + visible_margin
+                and ex <= vx + vw - visible_margin
+                and ey + target_h >= vy + 24
+                and ey <= vy + vh - 24
+            ):
+                x = max(vx, min(max(vx, vx + vw - target_w), ex))
+                y = max(vy, min(max(vy, vy + vh - target_h), ey))
+                placed_explicit = True
+
+        if not placed_explicit:
+            margin = self._s(18)
+            taskbar_pad = self._s(16) if monitor_rect is not None else self._s(68)
+            mw = m_right - m_left
+            mh = m_bottom - m_top
             if pos == "top_right":
-                x = max(12, screen_w - target_w - margin)
-                y = margin
+                x = max(m_left + 12, m_right - target_w - margin)
+                y = m_top + margin
             elif pos == "bottom_right":
-                x = max(12, screen_w - target_w - margin)
-                y = max(12, screen_h - target_h - taskbar_pad)
+                x = max(m_left + 12, m_right - target_w - margin)
+                y = max(m_top + 12, m_bottom - target_h - taskbar_pad)
             elif pos == "upper_center":
-                x = max(12, (screen_w - target_w) // 2)
-                y = max(32, (screen_h - target_h) // 3)
+                x = m_left + max(12, (mw - target_w) // 2)
+                y = m_top + max(28, (mh - target_h) // 3)
             else:  # center
-                x = max(12, (screen_w - target_w) // 2)
-                y = max(24, (screen_h - target_h) // 2 - self._s(16))
+                x = m_left + max(12, (mw - target_w) // 2)
+                y = m_top + max(24, (mh - target_h) // 2 - self._s(16))
 
         win.geometry(f"{target_w}x{target_h}+{x}+{y}")
         try:
@@ -586,6 +833,7 @@ class TkinterUI:
             win.update_idletasks()
         except Exception:
             pass
+        apply_dark_titlebar(win, dark=(self._theme == "dark"))
         self._last_fitted_size = (target_w, target_h)
         return target_w, target_h
 
@@ -639,6 +887,12 @@ class TkinterUI:
         """Hide the HUD window and show a Windows system tray icon (with safe iconify fallback)."""
 
         def _action() -> None:
+            try:
+                if self._active_screen == "hud" and self.root.state() != "withdrawn":
+                    self._hud_saved_pos = (self.root.winfo_x(), self.root.winfo_y())
+            except Exception:
+                pass
+
             on_toggle = self._hud_callbacks.get("on_toggle_pause")
             on_end = self._hud_callbacks.get("on_end_session")
             on_quit = self._hud_callbacks.get("on_quit")
@@ -701,8 +955,29 @@ class TkinterUI:
 
         self.dispatch(_action)
 
+    def toggle_hud_visibility(self) -> None:
+        """Toggle HUD between system tray and visible desktop state (Ctrl+Alt+H)."""
+
+        def _action() -> None:
+            try:
+                st = self.root.state()
+            except Exception:
+                st = "normal"
+            if self._tray is not None or st in ("withdrawn", "iconic"):
+                self.restore_from_tray()
+            elif self._active_screen == "hud":
+                self.minimize_to_tray()
+            else:
+                try:
+                    self.root.deiconify()
+                    self.root.lift()
+                except Exception:
+                    pass
+
+        self.dispatch(_action)
+
     def close(self) -> None:
-        """Safely cancel timers, stop tray, destroy popups, and tear down Tk on the main thread."""
+        """Safely cancel timers, stop tray, destroy popups/dialogs, and tear down Tk on the main thread."""
 
         def _do_close() -> None:
             if self._closed:
@@ -717,13 +992,23 @@ class TkinterUI:
                 self._pump_after_id = None
             self._stop_tray()
             self._hide_popups_and_overlay_now()
-            if self._rules_editor_win is not None:
-                try:
-                    if self._rules_editor_win.winfo_exists():
-                        self._rules_editor_win.destroy()
-                except Exception:
-                    pass
-                self._rules_editor_win = None
+            for attr in ("_rules_editor_win",):
+                w = getattr(self, attr, None)
+                if w is not None:
+                    try:
+                        if w.winfo_exists():
+                            w.destroy()
+                    except Exception:
+                        pass
+                    setattr(self, attr, None)
+            for dlg_attr in ("_activity_drawer", "_history_dialog", "_settings_dialog"):
+                dlg = getattr(self, dlg_attr, None)
+                if dlg is not None:
+                    try:
+                        dlg.close()
+                    except Exception:
+                        pass
+                    setattr(self, dlg_attr, None)
             try:
                 self.root.quit()
             except Exception:
@@ -748,9 +1033,18 @@ class TkinterUI:
             self._hud_timer_after_id = None
         self._hud_deadline = None
 
+    def _clear_hud_tooltips(self) -> None:
+        for tip in self._hud_tooltips:
+            try:
+                tip.hide_now()
+            except Exception:
+                pass
+        self._hud_tooltips.clear()
+
     def _clear_root_widgets(self) -> None:
         """Remove all existing children from the root window and reset screen-specific refs."""
         self._cancel_hud_timer()
+        self._clear_hud_tooltips()
         self._screen_gen += 1
         for child in self.root.winfo_children():
             try:
@@ -759,9 +1053,297 @@ class TkinterUI:
                 pass
         self._current_frame = None
         self._theme_btn = None
+        self._onboarding_key_entry = None
+        self._onboarding_show_btn = None
+        self._onboarding_feedback_lbl = None
+        self._onboarding_test_btn = None
+        self._onboarding_save_btn = None
+        self._onboarding_skip_btn = None
+        self._setup_progress_bar = None
+        self._setup_api_key_btn = None
+        if self._setup_api_key_tooltip is not None:
+            try:
+                self._setup_api_key_tooltip.hide_now()
+            except Exception:
+                pass
+            self._setup_api_key_tooltip = None
+        self._hud_startup_bar = None
         self._review_text_widget = None
         self._review_sub_label = None
         self._review_copy_btn = None
+        self._review_export_btn = None
+        self._review_progress_bar = None
+        self._review_kpi_holder = None
+        self._review_vault_holder = None
+
+    def show_onboarding(
+        self,
+        *,
+        on_save_key: Callable[[str], tuple[bool, str]],
+        on_test_key: Callable[[str, Callable[[bool, str], None]], None] | None = None,
+        on_continue: Callable[[], None],
+        on_skip: Callable[[], None],
+        initial_key: str = "",
+    ) -> None:
+        """Render the first-launch Google Gemini API key onboarding welcome screen."""
+        self.dispatch(
+            lambda: self._render_onboarding_now(
+                on_save_key=on_save_key,
+                on_test_key=on_test_key,
+                on_continue=on_continue,
+                on_skip=on_skip,
+                initial_key=initial_key,
+            )
+        )
+
+    def _render_onboarding_now(
+        self,
+        *,
+        on_save_key: Callable[[str], tuple[bool, str]],
+        on_test_key: Callable[[str, Callable[[bool, str], None]], None] | None = None,
+        on_continue: Callable[[], None],
+        on_skip: Callable[[], None],
+        initial_key: str = "",
+    ) -> None:
+        pal = self._active_palette()
+        self._hide_popups_and_overlay_now()
+        self._clear_root_widgets()
+        self._active_screen = "onboarding"
+        self._onboarding_callbacks = {
+            "on_save_key": on_save_key,
+            "on_test_key": on_test_key,
+            "on_continue": on_continue,
+            "on_skip": on_skip,
+        }
+
+        self.root.title("Anti-Distractor — Welcome")
+        self.root.configure(bg=pal["bg"])
+        self._reset_window_state(self.root, topmost=False, resizable=(True, True))
+
+        outer = tk.Frame(self.root, bg=pal["bg"], padx=24, pady=18)
+        outer.pack(fill="both", expand=True)
+        self._current_frame = outer
+
+        # Header block
+        header = tk.Frame(outer, bg=pal["bg"])
+        header.pack(fill="x", pady=(0, 14))
+
+        title_row = tk.Frame(header, bg=pal["bg"])
+        title_row.pack(fill="x")
+
+        tk.Label(
+            title_row,
+            text="Anti-Distractor",
+            font=("Segoe UI", 17, "bold"),
+            bg=pal["bg"],
+            fg=pal["text"],
+        ).pack(side="left")
+
+        tk.Label(
+            title_row,
+            text="  FIRST-TIME SETUP  ",
+            font=("Segoe UI", 8, "bold"),
+            bg=pal["primary_soft"],
+            fg=pal["primary"],
+            padx=6,
+            pady=3,
+        ).pack(side="left", padx=(10, 0), pady=(4, 0))
+
+        theme_lbl = "Light" if self._theme == "dark" else "Dark"
+        theme_btn = _make_button(
+            title_row,
+            text=theme_lbl,
+            command=self.toggle_theme,
+            variant="secondary",
+            font=("Segoe UI", 8, "bold"),
+            padx=9,
+            pady=3,
+            palette=pal,
+        )
+        theme_btn.pack(side="right", pady=(2, 0))
+        self._theme_btn = theme_btn
+
+        tk.Label(
+            header,
+            text="Connect your Google Gemini API key once to enable AI focus profiles, smart distraction detection, and session reviews.",
+            font=("Segoe UI", 9),
+            bg=pal["bg"],
+            fg=pal["text_secondary"],
+            wraplength=self._s(500),
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Main card
+        card = tk.Frame(
+            outer,
+            bg=pal["surface"],
+            padx=20,
+            pady=18,
+            highlightthickness=1,
+            highlightbackground=pal["border_strong"],
+        )
+        card.pack(fill="both", expand=True)
+
+        key_hdr = tk.Frame(card, bg=pal["surface"])
+        key_hdr.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            key_hdr,
+            text="GOOGLE GEMINI API KEY",
+            font=("Segoe UI", 8, "bold"),
+            bg=pal["surface"],
+            fg=pal["text_muted"],
+        ).pack(side="left")
+
+        get_key_lbl = tk.Label(
+            key_hdr,
+            text="Get a free key from Google AI Studio ↗",
+            font=("Segoe UI", 8, "bold"),
+            bg=pal["surface"],
+            fg=pal["primary"],
+            cursor="hand2",
+        )
+        get_key_lbl.pack(side="right")
+        get_key_lbl.bind("<Button-1>", lambda _e: self._url_opener("https://aistudio.google.com/apikey"))
+
+        entry_row = tk.Frame(card, bg=pal["surface"])
+        entry_row.pack(fill="x", pady=(0, 8))
+
+        key_var = tk.StringVar(value=initial_key)
+        self._onboarding_key_var = key_var
+
+        key_entry = ttk.Entry(
+            entry_row,
+            textvariable=key_var,
+            show="" if self._onboarding_show_key else "•",
+            font=("Segoe UI", 10),
+            style="Modern.TEntry",
+        )
+        key_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._onboarding_key_entry = key_entry
+
+        def _toggle_show() -> None:
+            self._onboarding_show_key = not self._onboarding_show_key
+            key_entry.configure(show="" if self._onboarding_show_key else "•")
+            show_btn.configure(text="Hide" if self._onboarding_show_key else "Show")
+
+        show_btn = _make_button(
+            entry_row,
+            text="Hide" if self._onboarding_show_key else "Show",
+            command=_toggle_show,
+            variant="secondary",
+            font=("Segoe UI", 8, "bold"),
+            padx=10,
+            pady=6,
+            palette=pal,
+        )
+        show_btn.pack(side="right")
+        self._onboarding_show_btn = show_btn
+
+        feedback_lbl = tk.Label(
+            card,
+            text="Saved locally in .env on this device — never shared or uploaded.",
+            font=("Segoe UI", 8),
+            bg=pal["surface"],
+            fg=pal["text_muted"],
+            anchor="w",
+            wraplength=self._s(480),
+            justify="left",
+        )
+        feedback_lbl.pack(fill="x", pady=(0, 14))
+        self._onboarding_feedback_lbl = feedback_lbl
+
+        def _set_feedback(msg: str, color_key: str) -> None:
+            if feedback_lbl.winfo_exists():
+                feedback_lbl.configure(text=msg, fg=pal[color_key])
+
+        def _handle_test() -> None:
+            if on_test_key is None:
+                return
+            candidate = key_var.get().strip()
+            if not candidate:
+                _set_feedback("Paste your Gemini API key above before testing.", "warning")
+                key_entry.focus_set()
+                return
+            test_btn.configure(state="disabled", text="Testing...")
+            _set_feedback("Testing Gemini API connection...", "text_secondary")
+
+            def _done(ok: bool, msg: str) -> None:
+                if not test_btn.winfo_exists():
+                    return
+                test_btn.configure(state="normal", text="Test Key")
+                _set_feedback(msg, "success" if ok else "danger")
+
+            on_test_key(candidate, _done)
+
+        def _handle_save_continue() -> None:
+            raw = key_var.get().strip()
+            ok, msg = on_save_key(raw)
+            if ok:
+                on_continue()
+            else:
+                _set_feedback(msg or "Please enter a valid Google Gemini API key.", "danger")
+                key_entry.focus_set()
+
+        btn_row = tk.Frame(card, bg=pal["surface"])
+        btn_row.pack(fill="x")
+
+        test_btn = _make_button(
+            btn_row,
+            text="Test Key",
+            command=_handle_test,
+            variant="secondary",
+            font=("Segoe UI", 9, "bold"),
+            padx=14,
+            pady=8,
+            palette=pal,
+        )
+        if on_test_key is not None:
+            test_btn.pack(side="left")
+        self._onboarding_test_btn = test_btn
+
+        save_btn = _make_button(
+            btn_row,
+            text="Save & Continue",
+            command=_handle_save_continue,
+            variant="primary",
+            font=("Segoe UI", 9, "bold"),
+            padx=18,
+            pady=8,
+            palette=pal,
+        )
+        save_btn.pack(side="right")
+        self._onboarding_save_btn = save_btn
+
+        # Footer skip option
+        footer = tk.Frame(outer, bg=pal["bg"])
+        footer.pack(fill="x", pady=(12, 0))
+
+        tk.Label(
+            footer,
+            text="You can add or change your API key anytime in Settings.",
+            font=("Segoe UI", 8),
+            bg=pal["bg"],
+            fg=pal["text_muted"],
+        ).pack(side="left")
+
+        skip_btn = _make_button(
+            footer,
+            text="Skip — Use Local Rules Only",
+            command=on_skip,
+            variant="chip",
+            font=("Segoe UI", 8, "bold"),
+            padx=10,
+            pady=4,
+            palette=pal,
+        )
+        skip_btn.pack(side="right")
+        self._onboarding_skip_btn = skip_btn
+
+        key_entry.bind("<Return>", lambda _e: _handle_save_continue())
+        key_entry.focus_set()
+
+        self._fit_window(self.root, min_w=560, min_h=310, pos="center", pad_w=14, pad_h=14, allow_resize=True)
 
     def show_setup(
         self,
@@ -770,8 +1352,33 @@ class TkinterUI:
         initial_duration: int | None = None,
         initial_mode: ModeType | None = None,
         on_edit_rules: Callable[[str], None] | None = None,
+        *,
+        presets: list[FocusPreset] | None = None,
+        on_select_preset: Callable[[FocusPreset], None] | None = None,
+        on_save_preset: Callable[[str, str, int, ModeType], list[FocusPreset]] | None = None,
+        on_delete_preset: Callable[[str], list[FocusPreset]] | None = None,
+        initial_pomodoro: bool | None = None,
+        pomodoro_cycles: int = 4,
+        on_pomodoro_toggled: Callable[[bool], None] | None = None,
+        on_open_history: Callable[[], None] | None = None,
+        on_open_settings: Callable[[], None] | None = None,
+        api_key_status: tuple[bool, str] | None = None,
+        on_open_api_key: Callable[[], None] | None = None,
     ) -> None:
-        """Render the goal/duration/mode setup screen with 'I'm ready' action."""
+        """Render the goal/duration/mode setup screen with presets, Pomodoro toggle, History, and Settings."""
+        extra = {
+            "presets": presets,
+            "on_select_preset": on_select_preset,
+            "on_save_preset": on_save_preset,
+            "on_delete_preset": on_delete_preset,
+            "initial_pomodoro": initial_pomodoro,
+            "pomodoro_cycles": pomodoro_cycles,
+            "on_pomodoro_toggled": on_pomodoro_toggled,
+            "on_open_history": on_open_history,
+            "on_open_settings": on_open_settings,
+            "api_key_status": api_key_status,
+            "on_open_api_key": on_open_api_key,
+        }
         self.dispatch(
             lambda: self._render_setup_now(
                 on_start,
@@ -779,6 +1386,7 @@ class TkinterUI:
                 initial_duration=initial_duration,
                 initial_mode=initial_mode,
                 on_edit_rules=on_edit_rules,
+                **extra,
             )
         )
 
@@ -789,6 +1397,18 @@ class TkinterUI:
         initial_duration: int | None = None,
         initial_mode: ModeType | None = None,
         on_edit_rules: Callable[[str], None] | None = None,
+        *,
+        presets: list[FocusPreset] | None = None,
+        on_select_preset: Callable[[FocusPreset], None] | None = None,
+        on_save_preset: Callable[[str, str, int, ModeType], list[FocusPreset]] | None = None,
+        on_delete_preset: Callable[[str], list[FocusPreset]] | None = None,
+        initial_pomodoro: bool | None = None,
+        pomodoro_cycles: int = 4,
+        on_pomodoro_toggled: Callable[[bool], None] | None = None,
+        on_open_history: Callable[[], None] | None = None,
+        on_open_settings: Callable[[], None] | None = None,
+        api_key_status: tuple[bool, str] | None = None,
+        on_open_api_key: Callable[[], None] | None = None,
     ) -> None:
         pal = self._active_palette()
         self._hide_popups_and_overlay_now()
@@ -796,18 +1416,31 @@ class TkinterUI:
         self._active_screen = "setup"
         self._setup_on_start = on_start
         self._setup_on_edit_rules = on_edit_rules
+        self._setup_extra_kwargs = {
+            "presets": presets,
+            "on_select_preset": on_select_preset,
+            "on_save_preset": on_save_preset,
+            "on_delete_preset": on_delete_preset,
+            "initial_pomodoro": initial_pomodoro,
+            "pomodoro_cycles": pomodoro_cycles,
+            "on_pomodoro_toggled": on_pomodoro_toggled,
+            "on_open_history": on_open_history,
+            "on_open_settings": on_open_settings,
+            "api_key_status": api_key_status,
+            "on_open_api_key": on_open_api_key,
+        }
 
         self.root.title("Anti-Distractor — Session Setup")
         self.root.configure(bg=pal["bg"])
         self._reset_window_state(self.root, topmost=False, resizable=(True, True))
 
-        outer = tk.Frame(self.root, bg=pal["bg"], padx=22, pady=18)
+        outer = tk.Frame(self.root, bg=pal["bg"], padx=22, pady=16)
         outer.pack(fill="both", expand=True)
         self._current_frame = outer
 
         # Header block
         header = tk.Frame(outer, bg=pal["bg"])
-        header.pack(fill="x", pady=(0, 14))
+        header.pack(fill="x", pady=(0, 12))
 
         title_row = tk.Frame(header, bg=pal["bg"])
         title_row.pack(fill="x")
@@ -837,12 +1470,68 @@ class TkinterUI:
             command=self.toggle_theme,
             variant="secondary",
             font=("Segoe UI", 8, "bold"),
-            padx=10,
+            padx=9,
             pady=3,
             palette=pal,
         )
         theme_btn.pack(side="right", pady=(2, 0))
         self._theme_btn = theme_btn
+
+        if on_open_settings is not None:
+            settings_btn = _make_button(
+                title_row,
+                text="Settings",
+                command=on_open_settings,
+                variant="secondary",
+                font=("Segoe UI", 8, "bold"),
+                padx=9,
+                pady=3,
+                palette=pal,
+            )
+            settings_btn.pack(side="right", padx=(0, 6), pady=(2, 0))
+            self._setup_settings_btn = settings_btn
+        else:
+            self._setup_settings_btn = None
+
+        if on_open_api_key is not None:
+            configured, status_str = api_key_status or (False, "Not configured")
+            key_btn = _make_button(
+                title_row,
+                text="Key ✓" if configured else "Set API Key",
+                command=on_open_api_key,
+                variant="success_outline" if configured else "warning_outline",
+                font=("Segoe UI", 8, "bold"),
+                padx=9,
+                pady=3,
+                palette=pal,
+            )
+            key_btn.pack(side="right", padx=(0, 6), pady=(2, 0))
+            self._setup_api_key_btn = key_btn
+            tip_text = (
+                f"Gemini API Key: {status_str} — Click to view or change"
+                if configured
+                else "No Gemini API key configured — Click to add your key"
+            )
+            self._setup_api_key_tooltip = ToolTip(key_btn, tip_text)
+        else:
+            self._setup_api_key_btn = None
+            self._setup_api_key_tooltip = None
+
+        if on_open_history is not None:
+            history_btn = _make_button(
+                title_row,
+                text="History & Stats",
+                command=on_open_history,
+                variant="secondary",
+                font=("Segoe UI", 8, "bold"),
+                padx=9,
+                pady=3,
+                palette=pal,
+            )
+            history_btn.pack(side="right", padx=(0, 6), pady=(2, 0))
+            self._setup_history_btn = history_btn
+        else:
+            self._setup_history_btn = None
 
         tk.Label(
             header,
@@ -850,7 +1539,7 @@ class TkinterUI:
             font=("Segoe UI", 9),
             bg=pal["bg"],
             fg=pal["text_secondary"],
-            wraplength=self._s(460),
+            wraplength=self._s(480),
             justify="left",
         ).pack(anchor="w", pady=(4, 0))
 
@@ -859,7 +1548,7 @@ class TkinterUI:
             outer,
             bg=pal["surface"],
             padx=20,
-            pady=18,
+            pady=16,
             highlightthickness=1,
             highlightbackground=pal["border_strong"],
             highlightcolor=pal["border_strong"],
@@ -879,9 +1568,102 @@ class TkinterUI:
         goal_var = tk.StringVar(value=goal_val_default)
         self._setup_goal_var = goal_var
         goal_entry = ttk.Entry(card, textvariable=goal_var, font=("Segoe UI", 10), style="Modern.TEntry")
-        goal_entry.pack(fill="x", pady=(0, 14))
+        goal_entry.pack(fill="x", pady=(0, 10 if presets is not None else 14))
 
-        # Duration row + quick preset chips
+        dur_val_default = str(initial_duration) if initial_duration is not None else "25"
+        dur_var = tk.StringVar(value=dur_val_default)
+        self._setup_dur_var = dur_var
+
+        mode_val_default = initial_mode if initial_mode in ("strict", "normal") else "strict"
+        mode_var = tk.StringVar(value=mode_val_default)
+        self._setup_mode_var = mode_var
+
+        # Optional Saved Focus Presets strip
+        self._setup_preset_btns: list[tk.Button] = []
+        if presets is not None:
+            presets_row = tk.Frame(card, bg=pal["surface"])
+            presets_row.pack(fill="x", pady=(0, 12))
+
+            def _render_preset_pills(current_presets: list[FocusPreset]) -> None:
+                self._setup_extra_kwargs["presets"] = current_presets
+                for child in presets_row.winfo_children():
+                    child.destroy()
+                self._setup_preset_btns.clear()
+
+                tk.Label(
+                    presets_row,
+                    text="Presets:",
+                    font=("Segoe UI", 8, "bold"),
+                    bg=pal["surface"],
+                    fg=pal["text_muted"],
+                ).pack(side="left", padx=(0, 4))
+
+                for p in current_presets[:5]:
+                    def _pick_preset(preset: FocusPreset = p) -> None:
+                        goal_var.set(preset.goal)
+                        dur_var.set(str(preset.duration_minutes))
+                        mode_var.set(preset.mode)
+                        if on_select_preset is not None:
+                            on_select_preset(preset)
+                        _set_status(f"Loaded preset '{preset.name}' (instant start — rules ready).")
+
+                    pill = _make_button(
+                        presets_row,
+                        text=p.name,
+                        command=_pick_preset,
+                        variant="chip",
+                        font=("Segoe UI", 8, "bold"),
+                        padx=8,
+                        pady=2,
+                        palette=pal,
+                    )
+                    if on_delete_preset is not None:
+                        pill.bind(
+                            "<Button-3>",
+                            lambda _e, name=p.name: _render_preset_pills(on_delete_preset(name)),
+                        )
+                        ToolTip(pill, f"{p.goal} ({p.duration_minutes}m · {p.mode}) — Right-click to delete")
+                    pill.pack(side="left", padx=(0, 5))
+                    self._setup_preset_btns.append(pill)
+
+                if on_save_preset is not None:
+                    def _prompt_save_preset() -> None:
+                        g_txt = goal_var.get().strip()
+                        if not g_txt:
+                            _set_status("Enter a goal first before saving a preset.", is_error=True)
+                            return
+                        name = simpledialog.askstring(
+                            "Save Focus Preset",
+                            "Preset name (e.g. 'System Design'):",
+                            parent=self.root,
+                        )
+                        if not name or not name.strip():
+                            return
+                        try:
+                            d_int = max(1, min(720, int(dur_var.get().strip())))
+                        except Exception:
+                            d_int = 25
+                        m_sel: ModeType = "normal" if mode_var.get() == "normal" else "strict"
+                        updated = on_save_preset(name.strip(), g_txt, d_int, m_sel)
+                        _render_preset_pills(updated)
+                        _set_status(f"Saved preset '{name.strip()}'.")
+
+                    save_p_btn = _make_button(
+                        presets_row,
+                        text="+ Save",
+                        command=_prompt_save_preset,
+                        variant="secondary",
+                        font=("Segoe UI", 8, "bold"),
+                        padx=7,
+                        pady=2,
+                        palette=pal,
+                    )
+                    save_p_btn.pack(side="right")
+                    self._setup_save_preset_btn = save_p_btn
+
+            _render_preset_pills(list(presets))
+
+        # Duration row + quick preset chips + optional Pomodoro toggle
         tk.Label(
             card,
             text="SESSION DURATION (MINUTES)",
@@ -891,11 +1673,8 @@ class TkinterUI:
         ).pack(anchor="w", pady=(0, 6))
 
         dur_row = tk.Frame(card, bg=pal["surface"])
-        dur_row.pack(fill="x", pady=(0, 16))
+        dur_row.pack(fill="x", pady=(0, 14))
 
-        dur_val_default = str(initial_duration) if initial_duration is not None else "25"
-        dur_var = tk.StringVar(value=dur_val_default)
-        self._setup_dur_var = dur_var
         dur_entry = ttk.Entry(dur_row, textvariable=dur_var, width=7, font=("Segoe UI", 10), style="Modern.TEntry")
         dur_entry.pack(side="left")
 
@@ -934,6 +1713,38 @@ class TkinterUI:
         dur_var.trace_add("write", _refresh_preset_styles)
         _refresh_preset_styles()
 
+        pomo_var = tk.BooleanVar(value=bool(initial_pomodoro) if initial_pomodoro is not None else False)
+        self._setup_pomodoro_var = pomo_var
+        if initial_pomodoro is not None or on_pomodoro_toggled is not None:
+            def _on_pomo_toggle() -> None:
+                if on_pomodoro_toggled is not None:
+                    try:
+                        on_pomodoro_toggled(bool(pomo_var.get()))
+                    except Exception:
+                        pass
+
+            pomo_chk = tk.Checkbutton(
+                dur_row,
+                text=f"Pomodoro ({max(2, int(pomodoro_cycles))}×)",
+                variable=pomo_var,
+                command=_on_pomo_toggle,
+                font=("Segoe UI", 8, "bold"),
+                bg=pal["surface"],
+                fg=pal["text_secondary"],
+                activebackground=pal["surface"],
+                activeforeground=pal["text"],
+                selectcolor=pal["surface_alt"],
+                cursor="hand2",
+            )
+            pomo_chk.pack(side="right")
+            ToolTip(
+                pomo_chk,
+                f"Auto-cycle {max(2, int(pomodoro_cycles))} work intervals with {self._break_minutes}m breaks",
+            )
+            self._setup_pomodoro_chk = pomo_chk
+        else:
+            self._setup_pomodoro_chk = None
+
         # Enforcement Mode selectable cards
         tk.Label(
             card,
@@ -942,10 +1753,6 @@ class TkinterUI:
             bg=pal["surface"],
             fg=pal["text_muted"],
         ).pack(anchor="w", pady=(0, 8))
-
-        mode_val_default = initial_mode if initial_mode in ("strict", "normal") else "strict"
-        mode_var = tk.StringVar(value=mode_val_default)
-        self._setup_mode_var = mode_var
 
         mode_cards: dict[str, tuple[tk.Frame, list[tk.Widget]]] = {}
 
@@ -1060,7 +1867,7 @@ class TkinterUI:
 
         # Footer inside card: inline validation status + optional Edit Rules + Start button
         status_row = tk.Frame(card, bg=pal["surface"])
-        status_row.pack(fill="x", pady=(6, 10))
+        status_row.pack(fill="x", pady=(4, 8))
 
         status_lbl = tk.Label(
             status_row,
@@ -1091,6 +1898,12 @@ class TkinterUI:
         else:
             self._setup_rules_btn = None
 
+        self._setup_progress_bar = ttk.Progressbar(
+            card,
+            mode="indeterminate",
+            style="Brand.Horizontal.TProgressbar",
+        )
+
         def _set_status(msg: str, is_error: bool = False) -> None:
             status_lbl.configure(
                 text=msg,
@@ -1116,16 +1929,25 @@ class TkinterUI:
 
             selected_mode: ModeType = "strict" if mode_var.get() == "strict" else "normal"
             start_btn.configure(state="disabled", text="Starting...", bg="#93C5FD")
-            _set_status("Starting session and building your focus profile...")
+            _set_status("Generating focus profile...")
+            try:
+                if self._setup_progress_bar is not None:
+                    self._setup_progress_bar.pack(fill="x", pady=(0, 8), before=start_btn)
+                    self._setup_progress_bar.start(14)
+            except Exception:
+                pass
             self.root.update_idletasks()
             try:
                 on_start(goal_val, dur_val, selected_mode)
             except Exception as err:
-                start_btn.configure(
-                    state="normal",
-                    text="I'm Ready — Start Session",
-                    bg=pal["primary"],
-                )
+                try:
+                    if self._setup_progress_bar is not None:
+                        self._setup_progress_bar.stop()
+                        self._setup_progress_bar.pack_forget()
+                except Exception:
+                    pass
+                _set_button_variant(start_btn, "primary", text="I'm Ready — Start Session", palette=pal)
+                start_btn.configure(state="normal")
                 _set_status(f"Failed to start: {err}", is_error=True)
                 messagebox.showerror("Start Failed", f"Could not start session: {err}")
 
@@ -1147,7 +1969,37 @@ class TkinterUI:
         dur_entry.bind("<Return>", lambda _e: _handle_start())
         goal_entry.focus_set()
 
-        self._fit_window(self.root, min_w=500, min_h=500, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+        self._fit_window(self.root, min_w=520, min_h=500, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+
+    def update_setup_progress(self, stage_text: str, running: bool = True) -> None:
+        """Update staged startup progress text and indeterminate bar on Setup or HUD."""
+
+        def _action() -> None:
+            if self._active_screen == "setup" and hasattr(self, "_setup_status_lbl"):
+                if self._setup_status_lbl is not None and self._setup_status_lbl.winfo_exists():
+                    self._setup_status_lbl.configure(text=stage_text, fg=self._p("text_secondary"))
+                if self._setup_progress_bar is not None and self._setup_progress_bar.winfo_exists():
+                    if running:
+                        if not self._setup_progress_bar.winfo_ismapped():
+                            self._setup_progress_bar.pack(fill="x", pady=(0, 8))
+                        self._setup_progress_bar.start(14)
+                    else:
+                        self._setup_progress_bar.stop()
+                        self._setup_progress_bar.pack_forget()
+            elif self._active_screen == "hud":
+                self._hud_last_summary = stage_text
+                if self._hud_summary_label is not None and self._hud_summary_label.winfo_exists():
+                    self._hud_summary_label.configure(text=stage_text, fg=self._p("text_secondary"))
+                if self._hud_startup_bar is not None and self._hud_startup_bar.winfo_exists():
+                    if running:
+                        if not self._hud_startup_bar.winfo_ismapped():
+                            self._hud_startup_bar.pack(fill="x", padx=12, pady=(2, 4))
+                        self._hud_startup_bar.start(14)
+                    else:
+                        self._hud_startup_bar.stop()
+                        self._hud_startup_bar.pack_forget()
+
+        self.dispatch(_action)
 
     def show_monitoring_hud(
         self,
@@ -1158,8 +2010,13 @@ class TkinterUI:
         on_toggle_pause: Callable[[], None] | None = None,
         on_open_rules: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
+        *,
+        on_open_activity: Callable[[], None] | None = None,
+        initial_hud_pos: tuple[int, int] | None = None,
     ) -> None:
-        """Render the compact, non-maximizable floating monitoring HUD in the top-right corner."""
+        """Render the compact, non-maximizable floating monitoring HUD."""
+        if initial_hud_pos is not None:
+            self._hud_saved_pos = (int(initial_hud_pos[0]), int(initial_hud_pos[1]))
         self.dispatch(
             lambda: self._render_hud_now(
                 goal=goal,
@@ -1168,9 +2025,59 @@ class TkinterUI:
                 duration_minutes=duration_minutes,
                 on_toggle_pause=on_toggle_pause,
                 on_open_rules=on_open_rules,
+                on_open_activity=on_open_activity,
                 on_quit=on_quit,
+                preserve_pos=self._hud_saved_pos,
             )
         )
+
+    def set_mini_mode(self, mini: bool) -> None:
+        """Switch HUD between compact Mini-Pill and full telemetry view."""
+
+        def _action() -> None:
+            if self._hud_mini_mode == bool(mini):
+                return
+            self._hud_mini_mode = bool(mini)
+            if self._active_screen == "hud" and "on_end_session" in self._hud_callbacks:
+                prev_pos = self._hud_saved_pos
+                try:
+                    if self.root.state() != "withdrawn":
+                        prev_pos = (self.root.winfo_x(), self.root.winfo_y())
+                except Exception:
+                    pass
+                self._render_hud_now(
+                    goal=self._hud_last_goal,
+                    mode=self._hud_last_mode,
+                    on_end_session=self._hud_callbacks["on_end_session"],
+                    duration_minutes=None,
+                    on_toggle_pause=self._hud_callbacks.get("on_toggle_pause"),
+                    on_open_rules=self._hud_callbacks.get("on_open_rules"),
+                    on_open_activity=self._hud_callbacks.get("on_open_activity"),
+                    on_quit=self._hud_callbacks.get("on_quit"),
+                    preserve_state=True,
+                    preserve_pos=prev_pos,
+                )
+
+        if threading.get_ident() == self._main_thread_id:
+            _action()
+        else:
+            self.dispatch(_action)
+
+    def toggle_mini_mode(self) -> None:
+        """Toggle HUD Mini-Pill mode."""
+        self.set_mini_mode(not self._hud_mini_mode)
+
+    def _format_state_badge_text(self) -> str:
+        if self._hud_paused:
+            return " PAUSED "
+        if (
+            self._hud_last_state == "GRACE_PERIOD"
+            and self._hud_grace_remaining is not None
+            and self._hud_grace_remaining > 0
+        ):
+            secs = max(1, int(math.ceil(self._hud_grace_remaining)))
+            return f" Grace: {secs}s "
+        return f" {self._hud_last_state} "
 
     def _render_hud_now(
         self,
@@ -1181,6 +2088,7 @@ class TkinterUI:
         duration_minutes: int | None = None,
         on_toggle_pause: Callable[[], None] | None = None,
         on_open_rules: Callable[[], None] | None = None,
+        on_open_activity: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
         preserve_state: bool = False,
         preserve_pos: tuple[int, int] | None = None,
@@ -1196,22 +2104,29 @@ class TkinterUI:
             "on_end_session": on_end_session,
             "on_toggle_pause": on_toggle_pause,
             "on_open_rules": on_open_rules,
+            "on_open_activity": on_open_activity,
             "on_quit": on_quit,
         }
         if not preserve_state:
             self._hud_pinned = True
             self._hud_paused = False
             self._hud_pause_remaining = 0.0
+            self._hud_grace_remaining = None
             self._hud_session_remaining_on_pause = None
             self._hud_last_state = "ON_TASK"
             self._hud_last_summary = "Monitoring active."
+            self._hud_pause_summary = "Break active — monitoring paused."
             self._hud_t1_count = 0
             self._hud_t2_count = 0
+
+        if saved_deadline is not None:
+            self._hud_deadline = saved_deadline
+        elif duration_minutes is not None and duration_minutes > 0:
+            self._hud_deadline = time.monotonic() + duration_minutes * 60.0
 
         self.root.title("Anti-Distractor — HUD")
         self.root.configure(bg=pal["border_strong"])
 
-        # Always exit zoomed/fullscreen state and disable maximize so HUD never traps tabs
         self._reset_window_state(
             self.root,
             topmost=self._hud_pinned,
@@ -1227,16 +2142,20 @@ class TkinterUI:
         frame.pack(fill="both", expand=True)
         self._current_frame = frame
 
-        # Smooth dragging (root coords in real UI + widget coords in headless tests)
+        # Multi-monitor smooth dragging + persisted position callback
         self._drag_data: dict[str, int | None] = {
             "x": 0,
             "y": 0,
             "win_x": 0,
             "win_y": 0,
             "use_root": 0,
+            "moved": 0,
+            "last_x": None,
+            "last_y": None,
         }
 
         def _start_drag(event: tk.Event) -> None:
+            self._drag_data["moved"] = 0
             x_root = getattr(event, "x_root", None)
             y_root = getattr(event, "y_root", None)
             if isinstance(x_root, int) and isinstance(y_root, int) and (x_root != 0 or y_root != 0):
@@ -1251,10 +2170,9 @@ class TkinterUI:
                 self._drag_data["y"] = getattr(event, "y", 0) or 0
 
         def _on_drag(event: tk.Event) -> None:
-            screen_w = max(640, self.root.winfo_screenwidth())
-            screen_h = max(480, self.root.winfo_screenheight())
+            vx, vy, vw, vh, _pw, _ph = self._get_virtual_screen_bounds()
             win_w = max(100, self.root.winfo_width())
-            win_h = max(60, self.root.winfo_height())
+            win_h = max(36, self.root.winfo_height())
 
             if self._drag_data.get("use_root"):
                 dx = (getattr(event, "x_root", 0) or 0) - (self._drag_data["x"] or 0)
@@ -1265,14 +2183,139 @@ class TkinterUI:
                 new_x = self.root.winfo_x() + ((getattr(event, "x", 0) or 0) - (self._drag_data["x"] or 0))
                 new_y = self.root.winfo_y() + ((getattr(event, "y", 0) or 0) - (self._drag_data["y"] or 0))
 
-            clamped_x = max(0, min(screen_w - win_w, new_x))
-            clamped_y = max(0, min(screen_h - win_h, new_y))
+            clamped_x = max(vx, min(max(vx, vx + vw - win_w), new_x))
+            clamped_y = max(vy, min(max(vy, vy + vh - win_h), new_y))
             self.root.geometry(f"+{clamped_x}+{clamped_y}")
+            self._hud_saved_pos = (clamped_x, clamped_y)
+            self._drag_data["moved"] = 1
+            self._drag_data["last_x"] = clamped_x
+            self._drag_data["last_y"] = clamped_y
+
+        def _end_drag(_event: tk.Event | None = None) -> None:
+            if self._drag_data.get("moved") and self._drag_data.get("last_x") is not None:
+                lx = int(self._drag_data["last_x"] or 0)
+                ly = int(self._drag_data["last_y"] or 0)
+                self._drag_data["moved"] = 0
+                if self.on_hud_moved is not None:
+                    try:
+                        self.on_hud_moved(lx, ly)
+                    except Exception:
+                        logger.exception("on_hud_moved callback failed")
 
         self._hud_start_drag = _start_drag
         self._hud_on_drag = _on_drag
+        self._hud_end_drag = _end_drag
 
-        # Top header bar
+        if self._hud_paused:
+            pill_bg, pill_fg = ("#D97706", "#FFFFFF")
+        else:
+            pill_bg, pill_fg = STATE_COLORS.get(self._hud_last_state, ("#64748B", "#FFFFFF"))
+        pill_text = self._format_state_badge_text()
+
+        # Compact single-row Mini-Pill Mode for small laptop screens
+        if self._hud_mini_mode:
+            self._hud_goal_label = None
+            self._hud_mode_label = None
+            self._hud_summary_label = None
+            self._hud_ai_calls_label = None
+            self._hud_ext_dot = None
+            self._hud_ext_label = None
+            self._hud_pin_btn = None
+            self._hud_rules_btn = None
+            self._hud_activity_btn = None
+            self._hud_tray_btn = None
+            self._hud_startup_bar = None
+
+            pill_row = tk.Frame(frame, bg=pal["surface"], padx=10, pady=6)
+            pill_row.pack(fill="both", expand=True)
+
+            grip = tk.Label(
+                pill_row,
+                text="⋮⋮",
+                font=("Segoe UI", 9, "bold"),
+                bg=pal["surface"],
+                fg=pal["border_strong"],
+                cursor="fleur",
+            )
+            grip.pack(side="left", padx=(0, 6))
+
+            self._hud_state_label = tk.Label(
+                pill_row,
+                text=f" ●{pill_text}",
+                font=("Segoe UI", 8, "bold"),
+                bg=pill_bg,
+                fg=pill_fg,
+                padx=6,
+                pady=2,
+                cursor="fleur",
+            )
+            self._hud_state_label.pack(side="left")
+
+            self._hud_timer_label = tk.Label(
+                pill_row,
+                text="--:--",
+                font=("Consolas", 9, "bold"),
+                bg=pal["surface"],
+                fg=pal["warning"] if self._hud_paused else pal["text"],
+                padx=8,
+                cursor="fleur",
+            )
+            self._hud_timer_label.pack(side="left")
+            if self._hud_paused:
+                p_mins, p_secs = divmod(max(0, int(math.ceil(self._hud_pause_remaining))), 60)
+                self._hud_timer_label.configure(text=f"{p_mins:02d}:{p_secs:02d}")
+            elif self._hud_deadline is not None:
+                self._tick_hud_timer()
+
+            self._hud_mini_btn = _make_button(
+                pill_row,
+                text="Expand",
+                command=self.toggle_mini_mode,
+                variant="secondary",
+                font=("Segoe UI", 8, "bold"),
+                padx=8,
+                pady=2,
+                palette=pal,
+            )
+            self._hud_mini_btn.pack(side="right", padx=(4, 0))
+            self._hud_tooltips.append(ToolTip(self._hud_mini_btn, "Expand full HUD"))
+
+            if on_toggle_pause is not None:
+                self._hud_pause_btn = _make_button(
+                    pill_row,
+                    text="Resume" if self._hud_paused else "Pause",
+                    command=on_toggle_pause,
+                    variant="warning_outline" if self._hud_paused else "secondary",
+                    font=("Segoe UI", 8, "bold"),
+                    padx=8,
+                    pady=2,
+                    palette=pal,
+                )
+                self._hud_pause_btn.pack(side="right")
+                self._hud_tooltips.append(ToolTip(self._hud_pause_btn, "Pause / Resume (Ctrl+Alt+P)"))
+            else:
+                self._hud_pause_btn = None
+
+            self._hud_tooltips.append(ToolTip(self._hud_state_label, lambda: f"{goal} — {self._hud_last_summary}"))
+
+            for w in (frame, pill_row, grip, self._hud_state_label, self._hud_timer_label):
+                w.bind("<Button-1>", _start_drag)
+                w.bind("<B1-Motion>", _on_drag)
+                w.bind("<ButtonRelease-1>", _end_drag)
+
+            self._fit_window(
+                self.root,
+                min_w=320,
+                min_h=40,
+                pos="top_right",
+                explicit_pos=preserve_pos,
+                pad_w=6,
+                pad_h=4,
+                allow_resize=False,
+            )
+            return
+
+        # Full HUD View
         top_row = tk.Frame(frame, bg=pal["surface"], padx=12, pady=8)
         top_row.pack(fill="x")
 
@@ -1297,6 +2340,7 @@ class TkinterUI:
             cursor="fleur",
         )
         self._hud_goal_label.pack(side="left", fill="x", expand=True)
+        self._hud_tooltips.append(ToolTip(self._hud_goal_label, f"Focus Goal: {goal}"))
 
         min_btn = _make_button(
             top_row,
@@ -1308,7 +2352,21 @@ class TkinterUI:
             pady=1,
             palette=pal,
         )
-        min_btn.pack(side="right", padx=(3, 0))
+        min_btn.pack(side="right", padx=(2, 0))
+        self._hud_tooltips.append(ToolTip(min_btn, "Minimize HUD to taskbar"))
+
+        self._hud_mini_btn = _make_button(
+            top_row,
+            text="▾",
+            command=self.toggle_mini_mode,
+            variant="ghost",
+            font=("Segoe UI", 8, "bold"),
+            padx=5,
+            pady=1,
+            palette=pal,
+        )
+        self._hud_mini_btn.pack(side="right", padx=(2, 0))
+        self._hud_tooltips.append(ToolTip(self._hud_mini_btn, "Collapse to compact Mini-Pill"))
 
         self._hud_tray_btn = _make_button(
             top_row,
@@ -1320,7 +2378,18 @@ class TkinterUI:
             pady=2,
             palette=pal,
         )
-        self._hud_tray_btn.pack(side="right", padx=(3, 0))
+        self._hud_tray_btn.pack(side="right", padx=(2, 0))
+        self._hud_tooltips.append(ToolTip(self._hud_tray_btn, "Hide HUD to system tray (Ctrl+Alt+H)"))
+
+        def _apply_pin_visual() -> None:
+            if self._hud_pin_btn is None or not self._hud_pin_btn.winfo_exists():
+                return
+            if self._hud_pinned:
+                self._hud_pin_btn.configure(text="Pinned", bg=pal["primary_soft"], fg=pal["primary"])
+                _bind_hover(self._hud_pin_btn, pal["primary_soft"], pal["primary_border"], pal["primary"], pal["primary"])
+            else:
+                self._hud_pin_btn.configure(text="Unpinned", bg=pal["surface_alt"], fg=pal["text_muted"])
+                _bind_hover(self._hud_pin_btn, pal["surface_alt"], pal["btn_secondary_hover"], pal["text_muted"], pal["text"])
 
         def _toggle_pin() -> None:
             self._hud_pinned = not self._hud_pinned
@@ -1328,38 +2397,27 @@ class TkinterUI:
                 self.root.attributes("-topmost", self._hud_pinned)
             except Exception:
                 pass
-            if self._hud_pin_btn is not None and self._hud_pin_btn.winfo_exists():
-                if self._hud_pinned:
-                    self._hud_pin_btn.configure(
-                        text="Pinned",
-                        bg=pal["primary_soft"],
-                        fg=pal["primary"],
-                    )
-                else:
-                    self._hud_pin_btn.configure(
-                        text="Unpinned",
-                        bg=pal["surface_alt"],
-                        fg=pal["text_muted"],
-                    )
+            _apply_pin_visual()
 
-        pin_bg = pal["primary_soft"] if self._hud_pinned else pal["surface_alt"]
-        pin_fg = pal["primary"] if self._hud_pinned else pal["text_muted"]
         self._hud_pin_btn = tk.Button(
             top_row,
             text="Pinned" if self._hud_pinned else "Unpinned",
             command=_toggle_pin,
             font=("Segoe UI", 7, "bold"),
-            bg=pin_bg,
-            fg=pin_fg,
-            activebackground=pal["primary_border"],
-            activeforeground=pal["primary"],
             relief="flat",
             bd=0,
             padx=6,
             pady=2,
             cursor="hand2",
         )
+        _apply_pin_visual()
         self._hud_pin_btn.pack(side="right", padx=(4, 0))
+        self._hud_tooltips.append(
+            ToolTip(
+                self._hud_pin_btn,
+                lambda: "HUD stays above all windows (click to unpin)" if self._hud_pinned else "Click to pin HUD on top",
+            )
+        )
 
         theme_lbl = "Light" if self._theme == "dark" else "Dark"
         self._theme_btn = _make_button(
@@ -1373,6 +2431,7 @@ class TkinterUI:
             palette=pal,
         )
         self._theme_btn.pack(side="right", padx=(4, 0))
+        self._hud_tooltips.append(ToolTip(self._theme_btn, "Switch Light / Dark theme"))
 
         mode_text = f"[{mode.upper()}]"
         mode_bg = pal["primary_soft"] if mode == "normal" else pal["danger_soft"]
@@ -1392,13 +2451,6 @@ class TkinterUI:
         status_row = tk.Frame(frame, bg=pal["surface"], padx=12, pady=4)
         status_row.pack(fill="x")
 
-        if self._hud_paused:
-            pill_text = " PAUSED "
-            pill_bg, pill_fg = ("#D97706", "#FFFFFF")
-        else:
-            pill_text = f" {self._hud_last_state} "
-            pill_bg, pill_fg = STATE_COLORS.get(self._hud_last_state, ("#64748B", "#FFFFFF"))
-
         self._hud_state_label = tk.Label(
             status_row,
             text=pill_text,
@@ -1411,11 +2463,12 @@ class TkinterUI:
         )
         self._hud_state_label.pack(side="left", anchor="n")
 
-        summary_fg = pal["danger"] if "AI unavailable" in self._hud_last_summary else pal["text_secondary"]
-        summary_font = ("Segoe UI", 9, "bold") if "AI unavailable" in self._hud_last_summary else ("Segoe UI", 9)
+        hud_summary_text = self._hud_pause_summary if self._hud_paused else self._hud_last_summary
+        summary_fg = pal["danger"] if "AI unavailable" in hud_summary_text else pal["text_secondary"]
+        summary_font = ("Segoe UI", 9, "bold") if "AI unavailable" in hud_summary_text else ("Segoe UI", 9)
         self._hud_summary_label = tk.Label(
             status_row,
-            text=self._hud_last_summary,
+            text=hud_summary_text,
             font=summary_font,
             bg=pal["surface"],
             fg=summary_fg,
@@ -1425,10 +2478,16 @@ class TkinterUI:
         )
         self._hud_summary_label.pack(side="left", padx=(8, 0), fill="x", expand=True)
 
+        self._hud_startup_bar = ttk.Progressbar(
+            frame,
+            mode="indeterminate",
+            style="Brand.Horizontal.TProgressbar",
+        )
+
         # Divider line
         tk.Frame(frame, bg=pal["border"], height=1).pack(fill="x", pady=(6, 0))
 
-        # Compact Footer: Telemetry line (timer, AI calls, Ext dot) + Action strip (Rules, Pause 5m, End)
+        # Compact Footer: Telemetry line + Action strip
         footer = tk.Frame(frame, bg=pal["surface_alt"], padx=12, pady=7)
         footer.pack(fill="x", side="bottom")
 
@@ -1443,10 +2502,6 @@ class TkinterUI:
             fg=pal["warning"] if self._hud_paused else pal["text"],
             anchor="w",
         )
-        if saved_deadline is not None:
-            self._hud_deadline = saved_deadline
-        elif duration_minutes is not None and duration_minutes > 0:
-            self._hud_deadline = time.monotonic() + duration_minutes * 60.0
 
         if self._hud_paused:
             p_mins, p_secs = divmod(max(0, int(math.ceil(self._hud_pause_remaining))), 60)
@@ -1488,6 +2543,12 @@ class TkinterUI:
             fg=ext_fg,
         )
         self._hud_ext_label.pack(side="left")
+        ext_tip_fn = lambda: (
+            "Browser extension connected on 127.0.0.1:8765"
+            if self._hud_ext_connected
+            else "Browser extension offline — load extension/ in Chrome or Edge"
+        )
+        self._hud_tooltips.append(ToolTip(self._hud_ext_label, ext_tip_fn))
 
         actions_row = tk.Frame(footer, bg=pal["surface_alt"])
         actions_row.pack(fill="x")
@@ -1499,13 +2560,28 @@ class TkinterUI:
                 command=on_open_rules,
                 variant="secondary",
                 font=("Segoe UI", 8, "bold"),
-                padx=10,
+                padx=9,
                 pady=4,
                 palette=pal,
             )
-            self._hud_rules_btn.pack(side="left")
+            self._hud_rules_btn.pack(side="left", padx=(0, 5))
+            self._hud_tooltips.append(ToolTip(self._hud_rules_btn, "Edit allowed & blocked sites/apps (Ctrl+Alt+R)"))
         else:
             self._hud_rules_btn = None
+
+        act_cmd = on_open_activity or (lambda: self.show_activity_drawer(self._activity_mark_relevant_cb))
+        self._hud_activity_btn = _make_button(
+            actions_row,
+            text="Activity",
+            command=act_cmd,
+            variant="secondary",
+            font=("Segoe UI", 8, "bold"),
+            padx=9,
+            pady=4,
+            palette=pal,
+        )
+        self._hud_activity_btn.pack(side="left")
+        self._hud_tooltips.append(ToolTip(self._hud_activity_btn, "Why was this flagged? View live AI checks"))
 
         end_btn = _make_button(
             actions_row,
@@ -1520,9 +2596,10 @@ class TkinterUI:
         end_btn.pack(side="right")
 
         if on_toggle_pause is not None:
+            pause_label = "Resume" if self._hud_paused else f"Pause {self._break_minutes}m"
             self._hud_pause_btn = _make_button(
                 actions_row,
-                text="Resume" if self._hud_paused else "Pause 5m",
+                text=pause_label,
                 command=on_toggle_pause,
                 variant="warning_outline" if self._hud_paused else "secondary",
                 font=("Segoe UI", 8, "bold"),
@@ -1531,10 +2608,18 @@ class TkinterUI:
                 palette=pal,
             )
             self._hud_pause_btn.pack(side="right", padx=(0, 6))
+            self._hud_tooltips.append(
+                ToolTip(
+                    self._hud_pause_btn,
+                    lambda: "Resume focus monitoring (Ctrl+Alt+P)"
+                    if self._hud_paused
+                    else f"Take a {self._break_minutes}-minute break (Ctrl+Alt+P)",
+                )
+            )
         else:
             self._hud_pause_btn = None
 
-        # Bind smooth drag to all non-button HUD elements
+        # Bind smooth drag + release persistence to all non-button HUD elements
         for w in (
             frame,
             top_row,
@@ -1555,17 +2640,29 @@ class TkinterUI:
         ):
             w.bind("<Button-1>", _start_drag)
             w.bind("<B1-Motion>", _on_drag)
+            w.bind("<ButtonRelease-1>", _end_drag)
 
         self._fit_window(
             self.root,
-            min_w=420,
-            min_h=136,
+            min_w=430,
+            min_h=138,
             pos="top_right",
             explicit_pos=preserve_pos,
             pad_w=8,
             pad_h=6,
             allow_resize=False,
         )
+
+    def reset_hud_timer(self, duration_seconds: float) -> None:
+        """Reset HUD work interval timer (e.g. when starting the next Pomodoro work cycle)."""
+
+        def _action() -> None:
+            self._hud_deadline = time.monotonic() + max(1.0, float(duration_seconds))
+            self._hud_session_remaining_on_pause = None
+            if not self._hud_paused:
+                self._tick_hud_timer()
+
+        self.dispatch(_action)
 
     def _tick_hud_timer(self) -> None:
         """Update the HUD remaining-time countdown once per second while not paused."""
@@ -1576,12 +2673,28 @@ class TkinterUI:
             return
         remaining = max(0, int(math.ceil(self._hud_deadline - time.monotonic())))
         mins, secs = divmod(remaining, 60)
-        self._hud_timer_label.configure(text=f"{mins:02d}:{secs:02d} left", fg=self._p("text"))
+        txt = f"{mins:02d}:{secs:02d}" if self._hud_mini_mode else f"{mins:02d}:{secs:02d} left"
+        self._hud_timer_label.configure(text=txt, fg=self._p("text"))
         if remaining > 0:
             try:
                 self._hud_timer_after_id = self.root.after(1000, self._tick_hud_timer)
             except Exception:
                 pass
+
+    def update_grace_countdown(self, remaining_seconds: float | None) -> None:
+        """Update live 'Grace: Xs' countdown on the HUD state pill during GRACE_PERIOD."""
+
+        def _action() -> None:
+            self._hud_grace_remaining = remaining_seconds
+            if self._hud_paused or self._hud_last_state != "GRACE_PERIOD":
+                return
+            if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
+                badge_txt = self._format_state_badge_text()
+                if self._hud_mini_mode:
+                    badge_txt = f" ●{badge_txt}"
+                self._hud_state_label.configure(text=badge_txt)
+
+        self.dispatch(_action)
 
     def update_ai_calls(self, t1_count: int, t2_count: int) -> None:
         """Update the small HUD line showing AI call counts (thread-safe)."""
@@ -1615,8 +2728,13 @@ class TkinterUI:
 
         self.dispatch(_action)
 
-    def update_pause_status(self, paused: bool, remaining_seconds: float = 0.0) -> None:
-        """Update HUD controls and countdown for Pause/Resume state (thread-safe)."""
+    def update_pause_status(
+        self,
+        paused: bool,
+        remaining_seconds: float = 0.0,
+        summary: str | None = None,
+    ) -> None:
+        """Update HUD controls and countdown for Pause/Resume state with synced hover colors."""
 
         def _action() -> None:
             pal = self._active_palette()
@@ -1625,8 +2743,11 @@ class TkinterUI:
             self._hud_pause_remaining = max(0.0, float(remaining_seconds))
 
             if paused:
+                if summary is not None and summary.strip():
+                    self._hud_pause_summary = summary.strip()
+                elif not was_paused:
+                    self._hud_pause_summary = "Break active — monitoring paused."
                 if not was_paused:
-                    # Snapshot remaining session time so session timer visibly pauses cleanly
                     if self._hud_deadline is not None:
                         self._hud_session_remaining_on_pause = max(0.0, self._hud_deadline - time.monotonic())
                     if self._hud_timer_after_id is not None:
@@ -1637,39 +2758,36 @@ class TkinterUI:
                         self._hud_timer_after_id = None
 
                 if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
-                    self._hud_state_label.configure(text=" PAUSED ", bg="#D97706", fg="#FFFFFF")
+                    lbl_txt = " ● PAUSED " if self._hud_mini_mode else " PAUSED "
+                    self._hud_state_label.configure(text=lbl_txt, bg="#D97706", fg="#FFFFFF")
                 if self._hud_summary_label is not None and self._hud_summary_label.winfo_exists():
                     self._hud_summary_label.configure(
-                        text="Break active — monitoring paused.",
+                        text=self._hud_pause_summary,
                         font=("Segoe UI", 9),
                         fg=pal["text_secondary"],
                     )
                 if self._hud_timer_label is not None and self._hud_timer_label.winfo_exists():
                     mins, secs = divmod(max(0, int(math.ceil(self._hud_pause_remaining))), 60)
-                    self._hud_timer_label.configure(text=f"Paused {mins:02d}:{secs:02d}", fg=pal["warning"])
-                    if not self._hud_timer_label.winfo_ismapped():
+                    t_str = f"{mins:02d}:{secs:02d}" if self._hud_mini_mode else f"Paused {mins:02d}:{secs:02d}"
+                    self._hud_timer_label.configure(text=t_str, fg=pal["warning"])
+                    if not self._hud_mini_mode and not self._hud_timer_label.winfo_ismapped():
                         self._hud_timer_label.pack(side="left", padx=(0, 10))
                 if self._hud_pause_btn is not None and self._hud_pause_btn.winfo_exists():
-                    self._hud_pause_btn.configure(
-                        text="Resume",
-                        bg=pal["warning_soft"],
-                        fg=pal["warning"],
-                        highlightbackground=pal["warning_border"],
-                    )
+                    _set_button_variant(self._hud_pause_btn, "warning_outline", text="Resume", palette=pal)
             else:
+                self._hud_pause_summary = "Break active — monitoring paused."
                 if was_paused and self._hud_session_remaining_on_pause is not None:
                     self._hud_deadline = time.monotonic() + self._hud_session_remaining_on_pause
                     self._hud_session_remaining_on_pause = None
                 if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
                     bg, fg = STATE_COLORS.get(self._hud_last_state, ("#64748B", "#FFFFFF"))
-                    self._hud_state_label.configure(text=f" {self._hud_last_state} ", bg=bg, fg=fg)
+                    lbl_txt = self._format_state_badge_text()
+                    if self._hud_mini_mode:
+                        lbl_txt = f" ●{lbl_txt}"
+                    self._hud_state_label.configure(text=lbl_txt, bg=bg, fg=fg)
                 if self._hud_pause_btn is not None and self._hud_pause_btn.winfo_exists():
-                    self._hud_pause_btn.configure(
-                        text="Pause 5m",
-                        bg=pal["btn_secondary_bg"],
-                        fg=pal["text"],
-                        highlightbackground=pal["border_strong"],
-                    )
+                    p_txt = "Pause" if self._hud_mini_mode else f"Pause {self._break_minutes}m"
+                    _set_button_variant(self._hud_pause_btn, "secondary", text=p_txt, palette=pal)
                 if self._hud_deadline is not None:
                     self._tick_hud_timer()
                 elif self._hud_timer_label is not None and self._hud_timer_label.winfo_exists():
@@ -1685,13 +2803,27 @@ class TkinterUI:
 
         def _action() -> None:
             pal = self._active_palette()
+            if state != "GRACE_PERIOD":
+                self._hud_grace_remaining = None
             self._hud_last_state = state
             self._hud_last_summary = summary
+
+            # Hide startup progress bar once monitoring is active
+            if self._hud_startup_bar is not None and self._hud_startup_bar.winfo_exists():
+                if self._hud_startup_bar.winfo_ismapped() and "starting" not in summary.lower() and "generating" not in summary.lower():
+                    try:
+                        self._hud_startup_bar.stop()
+                        self._hud_startup_bar.pack_forget()
+                    except Exception:
+                        pass
 
             if not self._hud_paused:
                 if self._hud_state_label is not None and self._hud_state_label.winfo_exists():
                     bg, fg = STATE_COLORS.get(state, ("#64748B", "#FFFFFF"))
-                    self._hud_state_label.config(text=f" {state} ", bg=bg, fg=fg)
+                    lbl_txt = self._format_state_badge_text()
+                    if self._hud_mini_mode:
+                        lbl_txt = f" ●{lbl_txt}"
+                    self._hud_state_label.config(text=lbl_txt, bg=bg, fg=fg)
 
                 if self._hud_summary_label is not None and self._hud_summary_label.winfo_exists():
                     display_summary = summary if len(summary) <= 85 else f"{summary[:82]}..."
@@ -1701,31 +2833,208 @@ class TkinterUI:
                     else:
                         self._hud_summary_label.config(font=("Segoe UI", 9), foreground=pal["text_secondary"])
 
-                    # Grow HUD height cleanly if summary wrapped onto 2 lines without shifting x/y
-                    try:
-                        self.root.update_idletasks()
-                        req_h = self.root.winfo_reqheight()
-                        cur_w = self.root.winfo_width()
-                        cur_h = self.root.winfo_height()
-                        if req_h > cur_h and cur_w > 100:
-                            x = self.root.winfo_x()
-                            y = self.root.winfo_y()
-                            new_h = min(self._s(240), req_h + 6)
-                            self.root.geometry(f"{cur_w}x{new_h}+{x}+{y}")
-                    except Exception:
-                        pass
+                    if not self._hud_mini_mode:
+                        try:
+                            self.root.update_idletasks()
+                            req_h = self.root.winfo_reqheight()
+                            cur_w = self.root.winfo_width()
+                            cur_h = self.root.winfo_height()
+                            if req_h > cur_h and cur_w > 100:
+                                x = self.root.winfo_x()
+                                y = self.root.winfo_y()
+                                new_h = min(self._s(240), req_h + 6)
+                                self.root.geometry(f"{cur_w}x{new_h}+{x}+{y}")
+                        except Exception:
+                            pass
 
             if self._tray is not None:
                 self._tray.update_state(state, paused=self._hud_paused, tooltip=f"Anti-Distractor — {state}")
 
         self.dispatch(_action)
 
+    # ------------------------------------------------------------------
+    # Live Activity Feed & Secondary Dialogs (History, Settings)
+    # ------------------------------------------------------------------
+    def clear_activity_items(self) -> None:
+        def _action() -> None:
+            self._activity_items.clear()
+            if self._activity_drawer is not None and self._activity_drawer.win.winfo_exists():
+                self._activity_drawer.refresh(self._activity_items)
+
+        self.dispatch(_action)
+
+    def append_activity_item(
+        self,
+        item: ActivityFeedItem,
+        *,
+        on_mark_relevant: Callable[[ActivityFeedItem], None] | None = None,
+    ) -> None:
+        def _action() -> None:
+            if on_mark_relevant is not None:
+                self._activity_mark_relevant_cb = on_mark_relevant
+            self._activity_items.append(item)
+            if len(self._activity_items) > 20:
+                self._activity_items = self._activity_items[-20:]
+            if self._activity_drawer is not None and self._activity_drawer.win.winfo_exists():
+                self._activity_drawer.refresh(self._activity_items)
+
+        self.dispatch(_action)
+
+    def mark_activity_overridden(self, log_id: int | None, source_key: str = "") -> None:
+        def _action() -> None:
+            for it in self._activity_items:
+                if (log_id is not None and it.log_id == log_id) or (
+                    source_key and it.source_key.lower() == source_key.lower() and not it.on_task
+                ):
+                    it.overridden = True
+            if self._activity_drawer is not None and self._activity_drawer.win.winfo_exists():
+                self._activity_drawer.refresh(self._activity_items)
+
+        self.dispatch(_action)
+
+    def show_activity_drawer(
+        self,
+        on_mark_relevant: Callable[[ActivityFeedItem], None] | None = None,
+    ) -> None:
+        def _action() -> None:
+            if on_mark_relevant is not None:
+                self._activity_mark_relevant_cb = on_mark_relevant
+            if self._activity_drawer is not None:
+                try:
+                    if self._activity_drawer.win.winfo_exists():
+                        self._activity_drawer.win.destroy()
+                except Exception:
+                    pass
+                self._activity_drawer = None
+
+            self._activity_drawer = ActivityDrawerDialog(
+                self.root,
+                palette=self._active_palette(),
+                dark=(self._theme == "dark"),
+                scale_fn=self._s,
+                fit_fn=self._fit_window,
+                make_btn_fn=_make_button,
+                items=self._activity_items,
+                on_mark_relevant=self._activity_mark_relevant_cb,
+                on_close=lambda: setattr(self, "_activity_drawer", None),
+            )
+
+        self.dispatch(_action)
+
+    def show_history_dialog(
+        self,
+        stats: dict[str, Any],
+        sessions: list[dict[str, Any]],
+        *,
+        on_read_review: Callable[[dict[str, Any]], None] | None = None,
+        on_repeat_session: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        def _action() -> None:
+            if self._history_dialog is not None:
+                try:
+                    if self._history_dialog.win.winfo_exists():
+                        self._history_dialog.win.destroy()
+                except Exception:
+                    pass
+                self._history_dialog = None
+
+            self._history_dialog = HistoryAnalyticsDialog(
+                self.root,
+                palette=self._active_palette(),
+                dark=(self._theme == "dark"),
+                scale_fn=self._s,
+                fit_fn=self._fit_window,
+                make_btn_fn=_make_button,
+                stats=stats,
+                sessions=sessions,
+                on_read_review=on_read_review,
+                on_repeat_session=on_repeat_session,
+                on_close=lambda: setattr(self, "_history_dialog", None),
+            )
+
+        self.dispatch(_action)
+
+    def update_setup_api_key_status(self, api_key_status: tuple[bool, str]) -> None:
+        """Refresh the Setup screen's API Key status pill immediately when the key changes."""
+        self._setup_extra_kwargs["api_key_status"] = api_key_status
+
+        def _action() -> None:
+            if self._active_screen != "setup" or self._setup_api_key_btn is None:
+                return
+            try:
+                if not self._setup_api_key_btn.winfo_exists():
+                    return
+            except Exception:
+                return
+            pal = self._active_palette()
+            configured, status_str = api_key_status
+            _set_button_variant(
+                self._setup_api_key_btn,
+                "success_outline" if configured else "warning_outline",
+                text="Key ✓" if configured else "Set API Key",
+                palette=pal,
+            )
+            if self._setup_api_key_tooltip is not None:
+                self._setup_api_key_tooltip.text = (
+                    f"Gemini API Key: {status_str} — Click to view or change"
+                    if configured
+                    else "No Gemini API key configured — Click to add your key"
+                )
+
+        self.dispatch(_action)
+
+    def show_settings_dialog(
+        self,
+        current_settings: AppSettings,
+        api_key_status: tuple[bool, str],
+        *,
+        on_save_settings: Callable[[AppSettings], None],
+        on_save_api_key: Callable[[str], tuple[bool, str]] | None = None,
+        on_test_api_key: Callable[[str, Callable[[bool, str], None]], None] | None = None,
+        on_clear_api_key: Callable[[], tuple[bool, str]] | None = None,
+        focus_api_key: bool = False,
+    ) -> None:
+        def _action() -> None:
+            if self._settings_dialog is not None:
+                try:
+                    if self._settings_dialog.win.winfo_exists():
+                        self._settings_dialog.win.destroy()
+                except Exception:
+                    pass
+                self._settings_dialog = None
+
+            self._settings_dialog = SettingsDialog(
+                self.root,
+                palette=self._active_palette(),
+                dark=(self._theme == "dark"),
+                scale_fn=self._s,
+                fit_fn=self._fit_window,
+                make_btn_fn=_make_button,
+                current_settings=current_settings,
+                api_key_status=api_key_status,
+                on_save_settings=on_save_settings,
+                on_save_api_key=on_save_api_key,
+                on_test_api_key=on_test_api_key,
+                on_clear_api_key=on_clear_api_key,
+                focus_api_key=focus_api_key,
+                url_opener=self._url_opener,
+                on_close=lambda: setattr(self, "_settings_dialog", None),
+            )
+
+        self.dispatch(_action)
+
+    # ------------------------------------------------------------------
+    # Smarter Editable Rules Dialog
+    # ------------------------------------------------------------------
     def show_rules_editor(
         self,
         profile: GoalProfile,
         on_save: Callable[[GoalProfile], None],
+        *,
+        on_ai_suggest: Callable[[str, Callable[[GoalProfile], None]], None] | None = None,
+        active_target: tuple[Literal["domain", "app"], str] | None = None,
     ) -> None:
-        """Open a deduplicated, DPI-aware dialog to edit allow/borderline/block rules live."""
+        """Open a conflict-preventing, DPI-aware dialog to edit allow/borderline/block rules live."""
 
         def _action() -> None:
             pal = self._active_palette()
@@ -1741,7 +3050,11 @@ class TkinterUI:
             win.title(f"Anti-Distractor — Focus Rules ({profile.goal})")
             win.configure(bg=pal["bg"])
             win.attributes("-topmost", True)
+            apply_brand_icon(self.root, win)
+            apply_dark_titlebar(win, dark=(self._theme == "dark"))
             self._rules_editor_win = win
+
+            current_topics: list[str] = list(profile.on_task_topics)
 
             outer = tk.Frame(win, bg=pal["bg"], padx=18, pady=14)
             outer.pack(fill="both", expand=True)
@@ -1762,11 +3075,79 @@ class TkinterUI:
                 fg=pal["text_secondary"],
                 wraplength=self._s(520),
                 justify="left",
-            ).pack(anchor="w", pady=(2, 10))
+            ).pack(anchor="w", pady=(2, 8))
 
-            # Tab switcher bar
+            # Optional mid-session 1-click "Current Site/App" shortcut banner
+            quick_allow_btn: tk.Button | None = None
+            quick_block_btn: tk.Button | None = None
+            if active_target is not None and active_target[1]:
+                t_kind, t_val = active_target
+                banner = tk.Frame(
+                    outer,
+                    bg=pal["surface"],
+                    padx=10,
+                    pady=6,
+                    highlightthickness=1,
+                    highlightbackground=pal["border_strong"],
+                )
+                banner.pack(fill="x", pady=(0, 8))
+                tk.Label(
+                    banner,
+                    text=f"Current {t_kind}: {t_val}",
+                    font=("Segoe UI", 9, "bold"),
+                    bg=pal["surface"],
+                    fg=pal["text"],
+                ).pack(side="left")
+
+                def _quick_add(allow: bool) -> None:
+                    if t_kind == "domain":
+                        dest = "allowed_domains" if allow else "blocked_domains"
+                        _show_tab("websites")
+                    else:
+                        dest = "allowed_apps" if allow else "blocked_apps"
+                        _show_tab("apps")
+                    _insert_with_dedup(dest, t_val, is_domain=(t_kind == "domain"))
+
+                quick_block_btn = _make_button(
+                    banner,
+                    text="Block",
+                    command=lambda: _quick_add(False),
+                    variant="danger_outline",
+                    font=("Segoe UI", 8, "bold"),
+                    padx=8,
+                    pady=3,
+                    palette=pal,
+                )
+                quick_block_btn.pack(side="right")
+
+                quick_allow_btn = _make_button(
+                    banner,
+                    text="+ Allow",
+                    command=lambda: _quick_add(True),
+                    variant="secondary",
+                    font=("Segoe UI", 8, "bold"),
+                    padx=8,
+                    pady=3,
+                    palette=pal,
+                )
+                quick_allow_btn.pack(side="right", padx=(0, 6))
+
+            # Tab switcher bar + optional pre-session AI Suggest Rules button
             tab_bar = tk.Frame(outer, bg=pal["bg"])
             tab_bar.pack(fill="x", pady=(0, 8))
+
+            footer = tk.Frame(outer, bg=pal["bg"])
+            footer.pack(fill="x", side="bottom", pady=(10, 0))
+
+            status_note = tk.Label(
+                outer,
+                text="Tip: Select any entry and press Delete or Backspace to remove it.",
+                font=("Segoe UI", 8),
+                bg=pal["bg"],
+                fg=pal["text_muted"],
+                anchor="w",
+            )
+            status_note.pack(fill="x", side="bottom", pady=(6, 0))
 
             content_holder = tk.Frame(
                 outer,
@@ -1785,6 +3166,51 @@ class TkinterUI:
             entries: dict[str, ttk.Entry] = {}
             add_btns: dict[str, tk.Button] = {}
             remove_btns: dict[str, tk.Button] = {}
+
+            section_labels = {
+                "allowed_domains": "Allowed Websites",
+                "borderline_domains": "Borderline Websites",
+                "blocked_domains": "Blocked Websites",
+                "allowed_apps": "Allowed Apps",
+                "blocked_apps": "Blocked Apps",
+            }
+            domain_keys = ("allowed_domains", "borderline_domains", "blocked_domains")
+            app_keys = ("allowed_apps", "blocked_apps")
+
+            def _insert_with_dedup(target_key: str, raw_val: str, *, is_domain: bool) -> bool:
+                norm = normalize_domain(raw_val) if is_domain else raw_val.strip().lower()
+                if not norm:
+                    status_note.configure(text="Enter a valid domain (e.g. github.com) or .exe name.", fg=pal["danger"])
+                    return False
+
+                siblings = domain_keys if is_domain else app_keys
+                moved_from: list[str] = []
+                for sib in siblings:
+                    if sib == target_key:
+                        continue
+                    sib_lb = listboxes[sib]
+                    sib_items = list(sib_lb.get(0, "end"))
+                    for idx in reversed(range(len(sib_items))):
+                        if sib_items[idx].lower() == norm.lower():
+                            sib_lb.delete(idx)
+                            moved_from.append(section_labels[sib])
+
+                target_lb = listboxes[target_key]
+                existing = {x.lower() for x in target_lb.get(0, "end")}
+                if norm.lower() not in existing:
+                    target_lb.insert("end", norm)
+
+                if moved_from:
+                    status_note.configure(
+                        text=f"Moved '{norm}' from {', '.join(moved_from)} → {section_labels[target_key]}.",
+                        fg=pal["primary"],
+                    )
+                else:
+                    status_note.configure(
+                        text=f"Added '{norm}' to {section_labels[target_key]}.",
+                        fg=pal["text_secondary"],
+                    )
+                return True
 
             def _make_section(
                 parent: tk.Misc,
@@ -1844,20 +3270,17 @@ class TkinterUI:
                     raw = ent_var.get().strip()
                     if not raw:
                         return
-                    norm = normalize_domain(raw) if is_domain else raw.lower()
-                    if not norm:
-                        return
-                    existing = set(lb.get(0, "end"))
-                    if norm not in existing:
-                        lb.insert("end", norm)
-                    ent_var.set("")
+                    if _insert_with_dedup(key, raw, is_domain=is_domain):
+                        ent_var.set("")
 
-                def _remove() -> None:
+                def _remove(_event: tk.Event | None = None) -> None:
                     sel = list(lb.curselection())
                     for idx in reversed(sel):
                         lb.delete(idx)
 
                 ent.bind("<Return>", lambda _e: _add())
+                lb.bind("<Delete>", _remove)
+                lb.bind("<BackSpace>", _remove)
 
                 add_btn = _make_button(
                     ctrl,
@@ -1972,6 +3395,57 @@ class TkinterUI:
             )
             tab_app_btn.pack(side="left")
 
+            ai_suggest_btn: tk.Button | None = None
+            if on_ai_suggest is not None:
+                def _handle_ai_suggest() -> None:
+                    if ai_suggest_btn is not None and ai_suggest_btn.winfo_exists():
+                        ai_suggest_btn.configure(state="disabled", text="Suggesting...")
+                    status_note.configure(text="Generating AI rule suggestions...", fg=pal["primary"])
+
+                    def _on_suggested(suggested: GoalProfile) -> None:
+                        def _apply_ui() -> None:
+                            if not win.winfo_exists():
+                                return
+                            current_topics.clear()
+                            current_topics.extend(suggested.on_task_topics or [profile.goal])
+                            mapping = {
+                                "allowed_domains": suggested.allowed_domains,
+                                "borderline_domains": suggested.borderline_domains,
+                                "blocked_domains": suggested.blocked_domains,
+                                "allowed_apps": suggested.allowed_apps,
+                                "blocked_apps": suggested.blocked_apps,
+                            }
+                            for k, vals in mapping.items():
+                                lb_k = listboxes[k]
+                                lb_k.delete(0, "end")
+                                seen_k: set[str] = set()
+                                for v in vals:
+                                    if v and v.lower() not in seen_k:
+                                        lb_k.insert("end", v)
+                                        seen_k.add(v.lower())
+                            if ai_suggest_btn is not None and ai_suggest_btn.winfo_exists():
+                                ai_suggest_btn.configure(state="normal", text="✨ AI Suggest Rules")
+                            status_note.configure(
+                                text="AI suggestions applied — review and click Save Rules.",
+                                fg=pal["success"],
+                            )
+
+                        self.dispatch(_apply_ui)
+
+                    on_ai_suggest(profile.goal, _on_suggested)
+
+                ai_suggest_btn = _make_button(
+                    tab_bar,
+                    text="✨ AI Suggest Rules",
+                    command=_handle_ai_suggest,
+                    variant="secondary",
+                    font=("Segoe UI", 8, "bold"),
+                    padx=10,
+                    pady=5,
+                    palette=pal,
+                )
+                ai_suggest_btn.pack(side="right")
+
             def _close() -> None:
                 if self._rules_editor_win is win:
                     self._rules_editor_win = None
@@ -1984,7 +3458,7 @@ class TkinterUI:
             def _save() -> None:
                 updated = GoalProfile(
                     goal=profile.goal,
-                    on_task_topics=list(profile.on_task_topics),
+                    on_task_topics=list(current_topics),
                     allowed_domains=list(listboxes["allowed_domains"].get(0, "end")),
                     borderline_domains=list(listboxes["borderline_domains"].get(0, "end")),
                     blocked_domains=list(listboxes["blocked_domains"].get(0, "end")),
@@ -1996,9 +3470,6 @@ class TkinterUI:
                     on_save(updated)
                 except Exception:
                     logger.exception("Error saving edited GoalProfile")
-
-            footer = tk.Frame(outer, bg=pal["bg"])
-            footer.pack(fill="x", side="bottom", pady=(10, 0))
 
             _make_button(
                 footer,
@@ -2031,14 +3502,21 @@ class TkinterUI:
                 "remove_btns": remove_btns,
                 "save_btn": save_btn,
                 "show_tab": _show_tab,
+                "status_lbl": status_note,
+                "ai_suggest_btn": ai_suggest_btn,
+                "quick_allow_btn": quick_allow_btn,
+                "quick_block_btn": quick_block_btn,
             }
 
             win.bind("<Escape>", lambda _e: _close())
             win.protocol("WM_DELETE_WINDOW", _close)
-            self._fit_window(win, min_w=540, min_h=540, pos="center", pad_w=14, pad_h=14, allow_resize=True)
+            self._fit_window(win, min_w=550, min_h=550, pos="center", pad_w=14, pad_h=14, allow_resize=True)
 
         self.dispatch(_action)
 
+    # ------------------------------------------------------------------
+    # Review Screen (KPI Cards, Animated Progress, Tab Vault & .md Export)
+    # ------------------------------------------------------------------
     def _render_markdown_into_text(self, txt: tk.Text, review_text: str) -> None:
         """Render lightweight Markdown (headings, bold, bullets) into a Tk Text widget."""
         txt.config(state="normal")
@@ -2075,26 +3553,193 @@ class TkinterUI:
 
         txt.config(state="disabled")
 
+    def _populate_review_kpis(self, holder: tk.Frame, kpis: SessionKPIs | None) -> None:
+        for child in holder.winfo_children():
+            child.destroy()
+        if kpis is None:
+            holder.pack_forget()
+            return
+
+        pal = self._active_palette()
+        score = int(kpis.focus_score_pct)
+        score_color = pal["success"] if score >= 75 else (pal["warning"] if score >= 50 else pal["danger"])
+        mins_str = f"{kpis.focused_minutes:.1f}m" if kpis.focused_minutes < 10 else f"{int(round(kpis.focused_minutes))}m"
+
+        metrics = [
+            ("FOCUS SCORE", f"{score}%", score_color),
+            ("FOCUSED TIME", mins_str, pal["primary"]),
+            ("DISTRACTIONS", str(kpis.distractions_count), pal["danger"] if kpis.distractions_count > 0 else pal["text"]),
+            ("OVERRIDES", str(kpis.overrides_count), pal["text"]),
+        ]
+        for idx, (label, val, accent) in enumerate(metrics):
+            holder.columnconfigure(idx, weight=1)
+            card = tk.Frame(
+                holder,
+                bg=pal["surface"],
+                padx=12,
+                pady=8,
+                highlightthickness=1,
+                highlightbackground=pal["border_strong"],
+            )
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 6, 0))
+            tk.Label(
+                card,
+                text=label,
+                font=("Segoe UI", 7, "bold"),
+                bg=pal["surface"],
+                fg=pal["text_muted"],
+            ).pack(anchor="w")
+            tk.Label(
+                card,
+                text=val,
+                font=("Segoe UI", 14, "bold"),
+                bg=pal["surface"],
+                fg=accent,
+            ).pack(anchor="w", pady=(2, 0))
+
+    def _populate_review_vault(self, holder: tk.Frame, closed_tabs: list[ClosedTabEntry]) -> None:
+        for child in holder.winfo_children():
+            child.destroy()
+        self._review_vault_reopen_btns: list[tk.Button] = []
+        self._review_vault_toggle_btn: tk.Button | None = None
+        self._review_vault_reopen_all_btn: tk.Button | None = None
+
+        if not closed_tabs:
+            holder.pack_forget()
+            return
+
+        pal = self._active_palette()
+        bar = tk.Frame(
+            holder,
+            bg=pal["surface"],
+            padx=10,
+            pady=6,
+            highlightthickness=1,
+            highlightbackground=pal["border_strong"],
+        )
+        bar.pack(fill="x")
+
+        items_frame = tk.Frame(
+            holder,
+            bg=pal["surface_alt"],
+            padx=10,
+            pady=6,
+            highlightthickness=1,
+            highlightbackground=pal["border"],
+        )
+        expanded = {"open": False}
+
+        def _toggle_vault() -> None:
+            expanded["open"] = not expanded["open"]
+            if expanded["open"]:
+                items_frame.pack(fill="x", pady=(2, 0))
+                toggle_btn.configure(text=f"▾ Closed Tabs Vault ({len(closed_tabs)})")
+            else:
+                items_frame.pack_forget()
+                toggle_btn.configure(text=f"▸ Closed Tabs Vault ({len(closed_tabs)})")
+
+        toggle_btn = _make_button(
+            bar,
+            text=f"▸ Closed Tabs Vault ({len(closed_tabs)})",
+            command=_toggle_vault,
+            variant="ghost",
+            font=("Segoe UI", 9, "bold"),
+            padx=6,
+            pady=2,
+            palette=pal,
+        )
+        toggle_btn.pack(side="left")
+        self._review_vault_toggle_btn = toggle_btn
+
+        def _reopen_all() -> None:
+            for entry in closed_tabs:
+                if entry.url:
+                    try:
+                        self._url_opener(entry.url)
+                    except Exception:
+                        logger.exception("Failed reopening URL %s", entry.url)
+
+        reopen_all_btn = _make_button(
+            bar,
+            text="Reopen All",
+            command=_reopen_all,
+            variant="secondary",
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=3,
+            palette=pal,
+        )
+        reopen_all_btn.pack(side="right")
+        self._review_vault_reopen_all_btn = reopen_all_btn
+
+        for entry in closed_tabs[:12]:
+            row = tk.Frame(items_frame, bg=pal["surface_alt"], pady=2)
+            row.pack(fill="x")
+            label_str = entry.title or entry.domain or entry.url
+            if len(label_str) > 54:
+                label_str = label_str[:51] + "..."
+            tk.Label(
+                row,
+                text=f"{label_str}  ({entry.domain})",
+                font=("Segoe UI", 8),
+                bg=pal["surface_alt"],
+                fg=pal["text_secondary"],
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+
+            r_btn = _make_button(
+                row,
+                text="Reopen",
+                command=lambda u=entry.url: self._url_opener(u),
+                variant="secondary",
+                font=("Segoe UI", 8, "bold"),
+                padx=8,
+                pady=2,
+                palette=pal,
+            )
+            r_btn.pack(side="right", padx=(6, 0))
+            self._review_vault_reopen_btns.append(r_btn)
+
     def show_review(
         self,
         review_text: str,
         on_close: Callable[[], None],
         on_new_session: Callable[[], None] | None = None,
+        *,
+        kpis: SessionKPIs | None = None,
+        closed_tabs: list[ClosedTabEntry] | None = None,
     ) -> None:
         """Display the end-of-session AI review screen (updating in-place if already open)."""
-        self.dispatch(lambda: self._render_review_now(review_text, on_close, on_new_session=on_new_session))
+        self.dispatch(
+            lambda: self._render_review_now(
+                review_text,
+                on_close,
+                on_new_session=on_new_session,
+                kpis=kpis,
+                closed_tabs=closed_tabs,
+            )
+        )
 
     def _render_review_now(
         self,
         review_text: str,
         on_close: Callable[[], None],
         on_new_session: Callable[[], None] | None = None,
+        *,
+        kpis: SessionKPIs | None = None,
+        closed_tabs: list[ClosedTabEntry] | None = None,
     ) -> None:
         pal = self._active_palette()
         self._review_callbacks = {
             "on_close": on_close,
             "on_new_session": on_new_session,
         }
+        if kpis is not None:
+            self._review_kpis = kpis
+        if closed_tabs is not None:
+            self._review_closed_tabs = list(closed_tabs)
+
+        is_loading = review_text.strip().lower().startswith("generating")
 
         # Smooth in-place refresh when async review arrives after "Generating your review..."
         if (
@@ -2107,7 +3752,6 @@ class TkinterUI:
             self._review_raw_text = review_text
             self._render_markdown_into_text(self._review_text_widget, review_text)
             if self._review_sub_label is not None and self._review_sub_label.winfo_exists():
-                is_loading = review_text.strip().lower().startswith("generating")
                 self._review_sub_label.configure(
                     text=(
                         "Compiling your focus metrics and session summary..."
@@ -2115,12 +3759,36 @@ class TkinterUI:
                         else "Here is your focus summary, highlights, and model breakdown:"
                     )
                 )
+            if self._review_progress_bar is not None and self._review_progress_bar.winfo_exists():
+                if is_loading:
+                    self._review_progress_bar.start(12)
+                else:
+                    self._review_progress_bar.stop()
+                    self._review_progress_bar.destroy()
+                    self._review_progress_bar = None
+            txt_container = getattr(self._review_text_widget, "frame", self._review_text_widget)
+            if kpis is not None and self._review_kpi_holder is not None and self._review_kpi_holder.winfo_exists():
+                self._populate_review_kpis(self._review_kpi_holder, kpis)
+                if self._review_kpi_holder.winfo_manager() != "pack":
+                    self._review_kpi_holder.pack(fill="x", pady=(0, 10), before=txt_container)
+            if (
+                closed_tabs is not None
+                and self._review_vault_holder is not None
+                and self._review_vault_holder.winfo_exists()
+            ):
+                self._populate_review_vault(self._review_vault_holder, self._review_closed_tabs)
+                if self._review_closed_tabs and self._review_vault_holder.winfo_manager() != "pack":
+                    self._review_vault_holder.pack(fill="x", side="bottom", pady=(8, 0), before=txt_container)
             return
 
         self._stop_tray()
         self._hide_popups_and_overlay_now()
         self._clear_root_widgets()
         self._active_screen = "review"
+        if kpis is None:
+            self._review_kpis = None
+        if closed_tabs is None:
+            self._review_closed_tabs = []
         gen = self._screen_gen
 
         self.root.title("Anti-Distractor — Session Review")
@@ -2131,8 +3799,6 @@ class TkinterUI:
             resizable=(True, True),
             deiconify=True,
         )
-        # Briefly raise above browser BEFORE _fit_window so Windows SetWindowPos
-        # doesn't revert the centered geometry back to top-right HUD coordinates.
         if not was_withdrawn:
             try:
                 self.root.attributes("-topmost", True)
@@ -2168,7 +3834,6 @@ class TkinterUI:
         )
         self._theme_btn.pack(side="right")
 
-        is_loading = review_text.strip().lower().startswith("generating")
         sub_lbl = tk.Label(
             frame,
             text=(
@@ -2180,12 +3845,31 @@ class TkinterUI:
             bg=pal["bg"],
             fg=pal["text_secondary"],
         )
-        sub_lbl.pack(anchor="w", pady=(0, 12))
+        sub_lbl.pack(anchor="w", pady=(0, 8))
         self._review_sub_label = sub_lbl
+
+        if is_loading:
+            pbar = ttk.Progressbar(frame, mode="indeterminate", style="Brand.Horizontal.TProgressbar")
+            pbar.pack(fill="x", pady=(0, 10))
+            pbar.start(12)
+            self._review_progress_bar = pbar
+
+        # KPI Summary Strip
+        kpi_holder = tk.Frame(frame, bg=pal["bg"])
+        self._review_kpi_holder = kpi_holder
+        if self._review_kpis is not None:
+            kpi_holder.pack(fill="x", pady=(0, 10))
+            self._populate_review_kpis(kpi_holder, self._review_kpis)
 
         # Footer buttons packed side="bottom" first so they can NEVER be pushed off-screen
         btn_row = tk.Frame(frame, bg=pal["bg"])
         btn_row.pack(fill="x", side="bottom", pady=(12, 0))
+
+        vault_holder = tk.Frame(frame, bg=pal["bg"])
+        self._review_vault_holder = vault_holder
+        if self._review_closed_tabs:
+            vault_holder.pack(fill="x", side="bottom", pady=(8, 0))
+            self._populate_review_vault(vault_holder, self._review_closed_tabs)
 
         self._review_raw_text = review_text
 
@@ -2213,6 +3897,64 @@ class TkinterUI:
         )
         copy_btn.pack(side="left")
         self._review_copy_btn = copy_btn
+
+        def _handle_export_md() -> None:
+            try:
+                target_path = filedialog.asksaveasfilename(
+                    parent=self.root,
+                    title="Save Session Review as Markdown",
+                    defaultextension=".md",
+                    initialfile="focus-session-review.md",
+                    filetypes=[("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")],
+                )
+                if not target_path:
+                    return
+                parts: list[str] = []
+                if self._review_kpis is not None:
+                    k = self._review_kpis
+                    mins_s = (
+                        f"{k.focused_minutes:.1f}m"
+                        if k.focused_minutes < 10
+                        else f"{int(round(k.focused_minutes))}m"
+                    )
+                    parts.append(
+                        "## Session KPIs\n"
+                        f"- **Focus Score:** {k.focus_score_pct}%\n"
+                        f"- **Focused Time:** {mins_s}\n"
+                        f"- **Distractions:** {k.distractions_count}\n"
+                        f"- **Overrides:** {k.overrides_count}"
+                    )
+                if self._review_raw_text.strip():
+                    parts.append(self._review_raw_text.rstrip())
+                if self._review_closed_tabs:
+                    vault_lines = ["## Closed Tabs Vault"]
+                    for entry in self._review_closed_tabs:
+                        safe_title = (entry.title or entry.domain or entry.url).replace("[", "(").replace("]", ")")
+                        vault_lines.append(f"- [{safe_title}]({entry.url})")
+                    parts.append("\n".join(vault_lines))
+                export_md = "\n\n".join(parts) + "\n"
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(export_md)
+                export_btn.configure(text="Saved!")
+                self.root.after(
+                    1500,
+                    lambda: export_btn.configure(text="Save .md") if export_btn.winfo_exists() else None,
+                )
+            except Exception:
+                logger.exception("Failed exporting review markdown")
+
+        export_btn = _make_button(
+            btn_row,
+            text="Save .md",
+            command=_handle_export_md,
+            variant="secondary",
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=7,
+            palette=pal,
+        )
+        export_btn.pack(side="left", padx=(8, 0))
+        self._review_export_btn = export_btn
 
         close_btn = _make_button(
             btn_row,
@@ -2244,7 +3986,7 @@ class TkinterUI:
             frame,
             wrap="word",
             width=64,
-            height=16,
+            height=14,
             font=("Consolas" if "```" in review_text else "Segoe UI", 10),
             bg=pal["surface"],
             fg=pal["text"],
@@ -2267,7 +4009,7 @@ class TkinterUI:
         self._render_markdown_into_text(txt, review_text)
         self._review_text_widget = txt
 
-        self._fit_window(self.root, min_w=600, min_h=480, pos="center", pad_w=12, pad_h=12, allow_resize=True)
+        self._fit_window(self.root, min_w=620, min_h=500, pos="center", pad_w=12, pad_h=12, allow_resize=True)
 
         if not was_withdrawn:
             def _clear_topmost() -> None:
@@ -2316,9 +4058,11 @@ class TkinterUI:
         self,
         goal: str,
         reason: str,
-        on_choice: Callable[[Literal["back_to_work", "relevant"]], None],
+        on_choice: Callable[[Literal["back_to_work", "relevant", "allow_domain"]], None],
+        *,
+        source_label: str | None = None,
     ) -> None:
-        """Display Layer 1 'Are you studying <goal>?' popup (thread-safe; stays until answered)."""
+        """Display non-focus-stealing Layer 1 nudge on the HUD's monitor."""
 
         def _action() -> None:
             pal = self._active_palette()
@@ -2329,6 +4073,9 @@ class TkinterUI:
             win.configure(bg=pal["surface"])
             win.attributes("-topmost", True)
             win.resizable(False, False)
+            apply_brand_icon(self.root, win)
+            apply_dark_titlebar(win, dark=(self._theme == "dark"))
+            apply_noactivate_topmost(win)
 
             tk.Frame(win, bg=pal["warning"], height=5).pack(fill="x")
 
@@ -2374,17 +4121,32 @@ class TkinterUI:
                 fg=pal["text_secondary"],
                 wraplength=self._s(390),
                 justify="left",
-            ).pack(anchor="w", pady=(0, 16))
+            ).pack(anchor="w", pady=(0, 14))
 
-            btn_row = tk.Frame(body, bg=pal["surface"])
-            btn_row.pack(fill="x", side="bottom")
-
-            def _choose(choice: Literal["back_to_work", "relevant"]) -> None:
+            def _choose(choice: Literal["back_to_work", "relevant", "allow_domain"]) -> None:
                 self._hide_popups_and_overlay_now()
                 try:
                     on_choice(choice)
                 except Exception:
                     logger.exception("Error in Layer 1 on_choice callback")
+
+            if source_label and source_label.strip():
+                clean_src = source_label.strip()
+                allow_btn = _make_button(
+                    body,
+                    text=f"Always allow {clean_src} for this session",
+                    command=lambda: _choose("allow_domain"),
+                    variant="ghost",
+                    font=("Segoe UI", 8, "bold"),
+                    padx=10,
+                    pady=4,
+                    palette=pal,
+                )
+                allow_btn.pack(fill="x", side="bottom", pady=(6, 0))
+                setattr(win, "_allow_domain_btn", allow_btn)
+
+            btn_row = tk.Frame(body, bg=pal["surface"])
+            btn_row.pack(fill="x", side="bottom")
 
             back_btn = _make_button(
                 btn_row,
@@ -2414,27 +4176,42 @@ class TkinterUI:
             win.protocol("WM_DELETE_WINDOW", self._hide_popups_and_overlay_now)
             self._active_popups.append(win)
 
-            self._fit_window(win, min_w=430, min_h=190, pos="bottom_right", pad_w=10, pad_h=10, allow_resize=False)
+            mon_rect = self._get_hud_monitor_work_area()
+            self._fit_window(
+                win,
+                min_w=430,
+                min_h=190,
+                pos="bottom_right",
+                monitor_rect=mon_rect,
+                pad_w=10,
+                pad_h=10,
+                allow_resize=False,
+            )
+            apply_noactivate_topmost(win)
 
         self.dispatch(_action)
 
     def show_layer2_warning(self, goal: str, reason: str) -> None:
-        """Display Layer 2 Normal-mode loud warning popup with live 12s auto-close countdown."""
+        """Display non-focus-stealing Layer 2 Normal-mode warning popup on the HUD's monitor."""
 
         def _action() -> None:
             pal = self._active_palette()
             self._hide_popups_and_overlay_now()
 
-            try:
-                self.root.bell()
-            except Exception:
-                pass
+            if not self._mute_sounds:
+                try:
+                    self.root.bell()
+                except Exception:
+                    pass
 
             win = tk.Toplevel(self.root)
             win.title("Anti-Distractor — OFF-TASK WARNING")
             win.configure(bg=pal["surface"])
             win.attributes("-topmost", True)
             win.resizable(False, False)
+            apply_brand_icon(self.root, win)
+            apply_dark_titlebar(win, dark=(self._theme == "dark"))
+            apply_noactivate_topmost(win)
 
             banner_bg = "#C62828"
             banner = tk.Frame(win, bg=banner_bg, padx=18, pady=12)
@@ -2512,17 +4289,28 @@ class TkinterUI:
                     secs = max(0, int(math.ceil(close_deadline - time.monotonic())))
                     countdown_lbl.configure(text=f"Auto-closes in {secs}s")
                     if secs > 0:
-                        win._countdown_id = win.after(1000, _tick_countdown)
+                        win._countdown_id = win.after(1000, _tick_countdown)  # type: ignore[attr-defined]
                 except Exception:
                     pass
 
-            win._auto_close_id = win.after(12000, _auto_close)
-            win._countdown_id = win.after(1000, _tick_countdown)
+            win._auto_close_id = win.after(12000, _auto_close)  # type: ignore[attr-defined]
+            win._countdown_id = win.after(1000, _tick_countdown)  # type: ignore[attr-defined]
             win.bind("<Escape>", lambda _e: self._hide_popups_and_overlay_now())
             win.protocol("WM_DELETE_WINDOW", self._hide_popups_and_overlay_now)
             self._active_popups.append(win)
 
-            self._fit_window(win, min_w=460, min_h=215, pos="upper_center", pad_w=10, pad_h=10, allow_resize=False)
+            mon_rect = self._get_hud_monitor_work_area()
+            self._fit_window(
+                win,
+                min_w=460,
+                min_h=215,
+                pos="bottom_right",
+                monitor_rect=mon_rect,
+                pad_w=10,
+                pad_h=10,
+                allow_resize=False,
+            )
+            apply_noactivate_topmost(win)
 
         self.dispatch(_action)
 
@@ -2546,6 +4334,9 @@ class TkinterUI:
             win.configure(bg=pal["surface"])
             win.attributes("-topmost", True)
             win.resizable(False, False)
+            apply_brand_icon(self.root, win)
+            apply_dark_titlebar(win, dark=(self._theme == "dark"))
+            apply_noactivate_topmost(win)
 
             banner_bg = "#C62828"
             banner = tk.Frame(win, bg=banner_bg, padx=18, pady=12)
@@ -2608,7 +4399,18 @@ class TkinterUI:
             self._tier0_popup = win
             self._active_popups.append(win)
 
-            self._fit_window(win, min_w=480, min_h=225, pos="upper_center", pad_w=12, pad_h=12, allow_resize=False)
+            mon_rect = self._get_hud_monitor_work_area()
+            self._fit_window(
+                win,
+                min_w=480,
+                min_h=225,
+                pos="upper_center",
+                monitor_rect=mon_rect,
+                pad_w=12,
+                pad_h=12,
+                allow_resize=False,
+            )
+            apply_noactivate_topmost(win)
 
         self.dispatch(_action)
 
@@ -2643,7 +4445,6 @@ class TkinterUI:
                 highlightthickness=1,
                 highlightbackground=pal["overlay_border"],
             )
-            # Place card cleanly centered on the primary monitor (even when secondary monitors extend left/up)
             center_x = max(240, (-vx) + (primary_w // 2))
             center_y = max(180, (-vy) + (primary_h // 2))
             card.place(x=center_x, y=center_y, anchor="center")

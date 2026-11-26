@@ -19,29 +19,31 @@ Unlike traditional site-blockers that rely on crude host blacklists or constant 
   - **Preference 3:** `gemma-4-26b-a4b-it` (tertiary fallback).
   - **Last Resort (Tier 0 Shift):** If all AI models are unavailable, shifts cleanly to local rule-based matching with a one-time user popup and persistent `"AI unavailable - rules only"` HUD status.
 - **Privacy-First Design & Self-Monitoring Guard:** Desktop screenshots exist only in ephemeral RAM (`io.BytesIO`) during Tier 2 evaluation and are **never saved to disk**. Both `WindowWatcher` and Tier 0 ignore Anti-Distractor's own windows so interacting with controls never triggers self-penalties or self-minimization.
-- **Compact Floating HUD & System Tray (`pystray`):** Draggable top-right HUD featuring a `-topmost` pin toggle (`Pinned`/`Unpinned`), live `MM:SS` countdown, `"AI calls: T1 x / T2 y"` telemetry, Chrome/Edge extension liveness dot (`Ext: Live` / `Ext: Off`), and one-click **`Tray`** minimization to the Windows system tray (`Show HUD`, `Pause / Resume`, `End Session`, `Quit`).
-- **Intentional Pause / Snooze (`Pause 5m`):** Pause monitoring for a 5-minute break (`Pause 5m` / `Resume`) without ending the session or losing focus streaks — triggers are suppressed during breaks, the session deadline shifts forward by elapsed break time, and monitoring auto-resumes when the break expires.
-- **Editable Domain & App Rules (Pre-Session & Live):** Inspect and edit Websites (`allowed_domains`, `borderline_domains`, `blocked_domains`) and Desktop Apps (`allowed_apps`, `blocked_apps`) before starting (`Edit Rules` on Setup) or mid-session (`Rules` on HUD), updating `EventEngine` and clearing `VerdictCache` immediately.
-- **Multi-Monitor Strict Mode Overlay & Deterministic State Machine:**
-  - **Normal Mode:** Gentle nudges &mdash; Grace Period &rarr; Layer 1 Ask (*"Are you studying `<goal>`?"*) &rarr; Layer 2 Warning (live auto-close countdown over 12s).
-  - **Strict Mode:** Escalates past nudges &rarr; closes offending browser tabs via extension commands, minimizes off-task desktop apps, and locks across the entire virtual desktop spanning multiple monitors (`GetSystemMetrics(76/77/78/79)`) with the lockout card centered on the primary screen.
+- **Native Windows Chrome & Multi-Monitor Awareness:** Branded target window icon across all windows, native Windows DWM dark titlebars (`DwmSetWindowAttribute`) in Dark Mode, non-focus-stealing Layer 1/2 nudges (`WS_EX_NOACTIVATE`), multi-monitor HUD dragging across the full virtual desktop with remembered `(x, y)` coordinates, and monitor-aware popup placement.
+- **Compact Floating HUD, Mini-Pill Mode & System Tray (`pystray`):** Draggable HUD featuring hover tooltips, live `Grace: Xs` countdown, `Pinned`/`Unpinned` toggle, live `MM:SS` timer, `"AI calls: T1 x / T2 y"`, Chrome/Edge extension liveness dot (`Ext: Live` / `Ext: Off`), collapsible **Mini-Pill** mode (`● ON_TASK | 25:00 | Pause | Expand`), and one-click **`Tray`** minimization (`Show HUD`, `Pause / Resume`, `End Session`, `Quit`).
+- **Intentional Pause / Snooze & Built-In Pomodoro Cycles:** Pause monitoring for configurable breaks (`5m / 10m / 15m` via `Pause` / `Resume`) without losing focus streaks, or enable **Pomodoro Mode** (e.g., `4 × 25m work / 5m break`) for automatic work &harr; break loops.
+- **Smarter Editable Rules & 1-Click Presets:** Pre-session Setup (`Edit Rules` + **`AI Suggest Rules`**) and live mid-session (`Rules` with 1-click **`Current domain/app: + Allow / Block`** banner), automatic conflict deduplication across Allowed/Borderline/Blocked lists, `<Delete>`/`<BackSpace>` removal, and named **Saved Focus Presets** (*DSA Prep*, *Deep Coding*, *Writing & Docs*, plus custom presets).
+- **Live Activity Feed ("Why Was This Flagged?"):** Collapsible **`Activity`** drawer showing the latest checks live (timestamp, domain/app, Tier 0/1/2 + model badge, confidence, AI reason) with 1-click **`Mark Relevant / Allow`**.
+- **Strict Mode Tab Vault & Multi-Monitor Lockout Overlay:** Closes distracting tabs in Strict Mode while saving their title + URL into the **`Closed Tabs Vault`** on Review (one-click **`Reopen`** / **`Reopen All`**) and engages a virtual-desktop multi-monitor lockout overlay (`GetSystemMetrics(76/77/78/79)`).
+- **Chrome/Edge Extension 2.0 & Quick Rules Bridge:** Dark-mode-aware popup (`prefers-color-scheme: dark`) polling `/status` for live session timer, current tab rule classification (`Allowed` / `Borderline` / `Blocked` / `AI-Judged`), 1-click **`+ Allow Site`** / **`Block Site`** (`POST /rules/quick` + Layer 1 **`Always allow`**), and live toolbar badge (`ON` / `BRK` / `!`).
+- **History & Focus Streaks + Settings & Export:** SQLite-backed **History & Focus Analytics** dashboard (daily streak, deep-work hours, top distractions, past review viewer, **`Repeat Goal`**), in-app **Settings** dialog (break length, mute chimes, dev/demo sensitivity, global hotkeys toggle, `.env` API key config & connection test), global Windows hotkeys (`Ctrl+Alt+P` / `Ctrl+Alt+H` / `Ctrl+Alt+R`), and Review **KPI cards** (`Focus Score`, `Focused Time`, `Distractions`, `Overrides`), animated loading bar, Markdown report, **`Copy Summary`**, **`Save .md`**, and **`New Session`**.
 - **Fairness & Overrides:** Click *"This is relevant"* to cache an immediate override. Low-confidence judgements (< 0.60) are never punished.
-- **Dark & Light Themes + Session Memory:** Instant `Dark` / `Light` theme toggle across Setup, HUD, Rules Editor, Popups, and Review, persisted alongside last goal, duration, and mode in `last_session.json`. DPI-aware dynamic window sizing (`SetProcessDpiAwareness(1)`) prevents clipping at 125%+ Windows scaling.
-- **Post-Session AI Review:** Stores text-only logs in SQLite (with `model_used` attribution) and renders an end-of-session Markdown report with `Copy Summary`, `New Session`, and `Done / Close` actions.
+- **Dark & Light Themes + Session Memory:** Instant `Dark` / `Light` theme toggle persisted alongside goal, duration, mode, and `(hud_x, hud_y)` in `last_session.json`. DPI-aware dynamic sizing (`SetProcessDpiAwareness(1)`) prevents clipping at 125%+ Windows scaling.
 
 ---
 
 ## 🏗️ Architecture
 
 ```text
- Chrome/Edge Extension (MV3)          Windows Desktop Watcher
+ Chrome/Edge Extension (MV3)          Windows Desktop Watcher & Hotkeys
   - Tab activate/update/close          - win32gui & psutil (self-PID filtered)
-  - GET /commands (close_tabs)         - Foreground window change
+  - Popup Dark/Light & Quick Rules     - RegisterHotKey (Ctrl+Alt+P / H / R)
+  - Toolbar Badge (ON / BRK / !)       - DWM Dark Titlebars & WS_EX_NOACTIVATE
              │                                     │
              ▼                                     ▼
       FastAPI Receiver ◄─────────────────────► EventEngine
-      (localhost:8765)                         - Debounce (1.5-3.0s) & Pause/Snooze
-      - Ext: Live/Off heartbeat                - Dwell, Heartbeat & Live Profile
+      (localhost:8765)                         - Debounce (1.5-3.0s) & Pause/Pomodoro
+      - /tabs, /commands, /status, /rules/quick - Dwell, Heartbeat & Live Profile
              │                                     │
              ▼                                     │
     VerdictCache (Tier 0) ◄────────────────────────┘
@@ -55,14 +57,14 @@ Unlike traditional site-blockers that rely on crude host blacklists or constant 
       Tier 2 Vision Judge (Multimodal Failover Chain)
              │
              ▼
-      AgentStateMachine (Normal vs Strict)
+      AgentStateMachine (Normal vs Strict, Live Grace Countdown)
              │
              ├── Dispatches UI Actions (Bounded Thread-Safe Queue)
              ▼
-      Tkinter UI (Dark/Light, Setup, HUD, Rules Editor, Multi-Monitor Overlay, Review)
+      Tkinter UI + Dialogs (Setup/Presets, Mini-Pill HUD, Activity Feed, History, Settings, Review KPIs & Tab Vault)
              │                                     │
              ▼                                     ▼
-      SessionLogger (SQLite Database)       SystemTrayManager (pystray)
+      SessionLogger (SQLite Analytics & Vault) SystemTrayManager (pystray)
 ```
 
 > Internal module contracts, design notes, and progress logs live in [docs/](docs/).
@@ -133,16 +135,16 @@ python -m app.main
 ```
 
 1. **Setup Screen:**
-   - Enter your focus goal (e.g. *"Study Data Structures and Algorithms"*).
-   - Pick a quick duration preset (`15m`, `25m`, `45m`, `60m`) or enter custom minutes.
+   - Pick a **Saved Focus Preset** (*DSA Prep*, *Deep Coding*, *Writing & Docs*) or enter a custom goal and click **`+ Save`** to store a new preset.
+   - Choose a quick duration (`15m`, `25m`, `45m`, `60m`) or custom minutes, and optionally check **`Pomodoro`** for automatic work/break loops.
    - Select **Strict Mode** or **Normal Mode**.
-   - Optionally toggle **`Dark` / `Light`** theme or click **`Edit Rules`** to inspect and customize domain/app allow and block lists before starting.
+   - Use header buttons for **`History & Stats`** (streaks, hours, top distractions), **`Settings`** (break length, mute sounds, dev/demo sensitivity, hotkeys, `.env` API key), **`Dark` / `Light`**, or **`Edit Rules`** (with **`AI Suggest Rules`**).
    - Click **`I'm Ready — Start Session`** (or press `Enter`).
-2. **Monitoring HUD:**
-   - A compact, floating HUD docks in the top-right corner showing your current goal, mode badge (`[STRICT]` or `[NORMAL]`), state badge (`ON_TASK`, `GRACE_PERIOD`, `PAUSED`), live `MM:SS` countdown, `AI calls: T1 x / T2 y`, and `Ext: Live` / `Ext: Off`.
-   - Use **`Rules`** to add/remove allowed or blocked sites/apps live, **`Pause 5m` / `Resume`** for intentional breaks, **`Pinned` / `Unpinned`** to toggle always-on-top behavior, or **`Tray`** to minimize the HUD into the Windows system tray.
+2. **Monitoring HUD & Extension Badge:**
+   - Draggable across single or multi-monitor setups (remembers position in `last_session.json`), with hover tooltips, `Grace: Xs` countdown, `MM:SS` timer, `AI calls: T1 x / T2 y`, and `Ext: Live` / `Ext: Off` while the browser toolbar displays **`ON`**, **`BRK`**, or **`!`**.
+   - Use **`▾`** / **`Expand`** to switch to **Mini-Pill Mode**, **`Activity`** to inspect live AI decisions (`Mark Relevant / Allow`), **`Rules`** for instant allow/block edits, **`Pause`** for breaks, **`Tray`** to minimize to the Windows tray, or global shortcuts (`Ctrl+Alt+P` Pause, `Ctrl+Alt+H` Show/Hide HUD, `Ctrl+Alt+R` Rules).
 3. **Ending Session & Review:**
-   - Click **`End Session`** (or let the timer finish) to open the formatted Markdown **Focus Session Review** with **`Copy Summary`**, **`New Session`**, and **`Done / Close`** buttons.
+   - Click **`End Session`** (or complete the timer/Pomodoro cycles) to view top-level **KPI cards**, an animated progress bar while AI summarizes, collapsible **Closed Tabs Vault** tab recovery (**`Reopen`** / **`Reopen All`**), **`Copy Summary`**, **`Save .md`**, **`New Session`**, and **`Done / Close`**.
 
 ---
 
@@ -185,14 +187,17 @@ Anti-Distractor includes a comprehensive unit and integration test suite with fa
 python -m pytest tests -v
 ```
 
-All 56 tests pass with zero network or window dependencies:
+All 70 tests across 10 test modules pass with zero network or window dependencies:
 - `tests/test_event_engine.py` (18 tests): Debounce, dwell, heartbeat, 5m pause/snooze suppression & expiry, tier escalation, background-browser guard, confidence gating, rate-limit backoff.
-- `tests/test_state_machine.py` (13 tests): State transitions, user overrides, disagreement fast-track, tab closure validation, lockout expiry & post-lockout recheck.
-- `tests/test_ui.py` (8 tests): DPI-aware setup & inline validation, HUD pin/unmaximize/timer, extension dot, pause/resume UI, Dark/Light theme toggle, editable rules dialog, system tray minimize/restore, multi-monitor strict overlay, Layer 2 auto-close countdown, and Markdown review.
-- `tests/test_main_wiring.py` (6 tests): `AppController` cross-thread orchestration, timer expiry, review fallback, `last_session.json` + theme persistence, self-window Tier 0 ignore, `restart_to_setup`, extension connectivity tick, pause/resume deadline extension, and pre-session & live rules editing.
+- `tests/test_state_machine.py` (14 tests): State transitions, user overrides, `allow_domain` quick action, `grace_remaining_seconds`, disagreement fast-track, tab closure validation, lockout expiry & post-lockout recheck.
+- `tests/test_ui.py` (10 tests): DPI-aware setup, presets, Mini-Pill HUD, hover-color sync, multi-monitor virtual-screen drag clamping, tooltips, `Grace: Xs` countdown, smart Rules conflict deduplication & `<Delete>`/`AI Suggest`, non-focus-stealing Layer 1/2 prefs, Activity Drawer, Review KPI cards + Tab Vault + `.md` export, History, and Settings dialogs.
+- `tests/test_main_wiring.py` (7 tests): `AppController` orchestration, timer expiry, review fallback, `last_session.json` + theme + `(hud_x, hud_y)` persistence, Tab Vault capture/SQLite save, Pomodoro multi-cycle work/break loop, presets, quick rules, and Activity Feed overrides.
 - `tests/test_model_preferences.py` (6 tests): Preference failover (`gemini-3.5-flash-lite` &rarr; `gemma-4-31b-it` &rarr; `gemma-4-26b-a4b-it`), 404/timeouts/network errors, markdown fence stripping, Tier 0 shift popup & HUD status, recovery probing.
+- `tests/test_win32_and_hotkeys.py` (5 tests): Native DWM dark titlebar fallback (`20` &rarr; `19`), `WS_EX_NOACTIVATE` bitmask, multi-monitor `GetMonitorInfoW` work area, brand icon caching, and `GlobalHotkeyManager` (`Ctrl+Alt+P/H/R`).
 - `tests/test_demo_runbook.py` (3 tests): Full 6-step demo walkthrough, timing presets, and extension disconnect resilience.
-- `tests/test_logger.py` (2 tests): SQLite session lifecycle, event logging, override updates, `model_used` column storage, and legacy DB `ALTER TABLE` migration.
+- `tests/test_logger.py` (3 tests): SQLite session lifecycle, event logging, override updates, `model_used` + `closed_tabs_json` storage/migration, streak calculation, and top-distractions analytics.
+- `tests/test_settings_and_presets.py` (3 tests): `SettingsStore` sanitization & round-trip, `.env` `GEMINI_API_KEY` update preserving comments, and `PresetsStore` starter seeding/CRUD.
+- `tests/test_server_and_quick_rules.py` (1 test): `GET /status?domain=...` rule classification and `POST /rules/quick` live profile/cache mutation.
 
 ---
 
