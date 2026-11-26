@@ -25,3 +25,6 @@ Thumbs.db
 .idea/
 review_bundle.txt
 ui_shots/
+
+# Local presentation notes (do not push)
+presentation.md
