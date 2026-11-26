@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 # DWM attributes
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWCP_DEFAULT = 0
+DWMWCP_DONOTROUND = 1
+DWMWCP_ROUND = 2
+DWMWCP_ROUNDSMALL = 3
 
 # Extended window style constants
 GWL_EXSTYLE = -20
@@ -95,12 +100,33 @@ def apply_brand_icon(root: tk.Misc, win: tk.Misc | None = None) -> None:
     try:
         photo = getattr(root, "_brand_icon_photo", None)
         if photo is None:
-            img = create_tray_icon_image("#2563EB", 64)
+            img = create_tray_icon_image("#6366F1", 64)
             photo = ImageTk.PhotoImage(img, master=root)
             setattr(root, "_brand_icon_photo", photo)
         target.iconphoto(win is None, photo)  # type: ignore[attr-defined]
     except Exception:
         logger.debug("Skipping brand icon on headless/mocked window", exc_info=True)
+
+
+def apply_rounded_corners(win: tk.Misc, *, small: bool = False) -> None:
+    """Enable native Windows 11 DWM rounded window corners (no-op on older Windows/other OS)."""
+    if sys.platform != "win32":
+        return
+    try:
+        u32 = _get_user32()
+        dwmapi = _get_dwmapi()
+        hwnd = _resolve_outer_hwnd(win, u32=u32)
+        if hwnd <= 0:
+            return
+        pref = ctypes.c_int(DWMWCP_ROUNDSMALL if small else DWMWCP_ROUND)
+        dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd),
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            ctypes.byref(pref),
+            ctypes.sizeof(pref),
+        )
+    except Exception:
+        logger.debug("DWMWA_WINDOW_CORNER_PREFERENCE unavailable or failed", exc_info=True)
 
 
 def apply_dark_titlebar(win: tk.Misc, dark: bool) -> None:

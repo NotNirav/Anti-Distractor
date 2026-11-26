@@ -8,3 +8,4 @@ google-genai>=1.0.0
 python-dotenv>=1.0.1
 pydantic>=2.0.0
 pystray>=0.19.5
+customtkinter>=5.2.2
